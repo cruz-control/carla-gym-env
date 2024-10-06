@@ -101,7 +101,7 @@ class CarlaEnv(gym.Env):
     self.collision_hist_l = 1 # collision history length
     self.collision_bp = self.world.get_blueprint_library().find('sensor.other.collision')
 
-    # Lidar sensor
+    # LIDAR sensor
     self.lidar_data = None
     self.lidar_height = 1.8
     self.lidar_trans = carla.Transform(carla.Location(x=-0.5, z=self.lidar_height))
@@ -113,7 +113,15 @@ class CarlaEnv(gym.Env):
     self.lidar_bp.set_attribute('rotation_frequency', str(1.0 / 0.05))
     self.lidar_bp.set_attribute('points_per_second', '500000')
 
-
+    # Radar sensor
+    self.radar_data = None
+    self.radar_bp = self.world.get_blueprint_library().find('sensor.other.radar') # Fetch the blueprint from CARLA's library
+    self.radar_bp.set_attribute('horizontal_fov', '30')                           # Set horizontal field of view's angle
+    self.radar_bp.set_attribute('vertical_fov', '20')                             # Set vertical field of view's angle
+    self.radar_bp.set_attribute('range', '100')                                   # Set detection range (meters)
+    self.radar_bp.set_attribute('points_per_second', '15000')                     # Set scan frequency (points per second)
+    self.radar_trans = carla.Transform(carla.Location(x=2.0, z=1.0))              # Set location of sensor relative to vehicle (meters)
+    
     # Camera sensor
     self.camera_img = np.zeros((4, self.obs_size, self.obs_size, 3), dtype = np.dtype("uint8"))
 
@@ -218,7 +226,7 @@ class CarlaEnv(gym.Env):
         self.collision_hist.pop(0)
     self.collision_hist = []
 
-    # Add lidar sensor
+    # Add LIDAR sensor
     self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
     self.point_list = o3d.geometry.PointCloud()
     self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
@@ -241,6 +249,13 @@ class CarlaEnv(gym.Env):
 
       point_list.points = o3d.utility.Vector3dVector(points)
       point_list.colors = o3d.utility.Vector3dVector(int_color)
+
+    # Add radar sensor
+    self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
+    self.radar_sensor.listen(lambda data: self.get_radar_data(data))
+    def get_radar_data(self, radar_data):
+      # Function to handle radar data. Currently incomplete, replace this comment with more code
+      velocity_range = (-7.5, 7.5)
 
     def run_open3d():
       self.vis = o3d.visualization.Visualizer()
