@@ -160,6 +160,7 @@ class CarlaEnv(gym.Env):
     self.camera2_sensor = None
     self.camera3_sensor = None
     self.camera4_sensor = None
+    self.radar_sensor = None #cleared radar
 
     # Delete sensors, vehicles and walkers
     self._clear_all_actors(['sensor.other.collision', 'sensor.lidar.ray_cast', 'sensor.camera.rgb', 'vehicle.*', 'controller.ai.walker', 'walker.*'])
@@ -256,6 +257,8 @@ class CarlaEnv(gym.Env):
     def get_radar_data(self, radar_data):
       # Function to handle radar data. Currently incomplete, replace this comment with more code
       velocity_range = (-7.5, 7.5)
+      points = np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4'))  
+      points = np.reshape(points, (len(radar_data), 4))   #reshape data into numpy array with 4 values 
 
     def run_open3d():
       self.vis = o3d.visualization.Visualizer()
