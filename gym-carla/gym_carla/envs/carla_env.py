@@ -255,8 +255,6 @@ class CarlaEnv(gym.Env):
     self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
     self.radar_sensor.listen(lambda data: self.get_radar_data(data))
     def get_radar_data(self, radar_data):
-      # Function to handle radar data. Currently incomplete, replace this comment with more code
-      velocity_range = (-7.5, 7.5)
       points = np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4'))  
       points = np.reshape(points, (len(radar_data), 4))   #reshape data into numpy array with 4 values 
 
