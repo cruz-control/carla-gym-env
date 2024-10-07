@@ -160,6 +160,7 @@ class CarlaEnv(gym.Env):
     self.camera2_sensor = None
     self.camera3_sensor = None
     self.camera4_sensor = None
+    self.radar_sensor = None #cleared radar
 
     # Delete sensors, vehicles and walkers
     self._clear_all_actors(['sensor.other.collision', 'sensor.lidar.ray_cast', 'sensor.camera.rgb', 'vehicle.*', 'controller.ai.walker', 'walker.*'])
