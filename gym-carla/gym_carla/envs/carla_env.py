@@ -256,19 +256,21 @@ class CarlaEnv(gym.Env):
     self.point_values = o3d.geometry.PointCloud()
     self.radar_sensor.listen(lambda data: get_radar_data(data,self.point_values))
     def get_radar_data(radar_data, point_values):
-      # Function to handle radar data. Currently incomplete, replace this comment with more code
-      #velocity_range = (-7.5, 7.5)
-      points = np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4'))  
-      points = np.reshape(points, (len(radar_data), 4))
+      data = np.copy(np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4')))
+      data = np.reshape(data, (len(radar_data), 4))
       
       #get velocity and make color map 
-      velocity = points[:,-1] #this is the velocity of objects coming towards the sensor 
+      velocity = data[:,-1] #this is the velocity of objects coming towards the sensor 
       velocity_col = 1.0 - np.log(velocity) / np.log(np.exp(-0.004 * 100))
       int_color = np.c_[
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 0]),
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 1]),
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 2])]
+      
+      # Isolate the 3D data
+      points = data[:, :-1]
 
+      points[:, :1] = -points[:, :1]
 
       point_values.points = o3d.utility.Vector3dVector(points)
       point_values.colors = o3d.utility.Vector3dVector(int_color)  #point cloud with colors 
