@@ -255,7 +255,7 @@ class CarlaEnv(gym.Env):
     self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
     self.point_values = o3d.geometry.PointCloud()
     self.radar_sensor.listen(lambda data: get_radar_data(data,self.point_values))
-    def get_radar_data(self, radar_data):
+    def get_radar_data(radar_data, point_values):
       # Function to handle radar data. Currently incomplete, replace this comment with more code
       #velocity_range = (-7.5, 7.5)
       points = np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4'))  
@@ -270,8 +270,8 @@ class CarlaEnv(gym.Env):
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 2])]
 
 
-      self.point_values.points = o3d.utility.Vector3dVector(points)
-      self.point_values.colors = o3d.utility.Vector3dVector(int_color)  #point cloud with colors 
+      point_values.points = o3d.utility.Vector3dVector(points)
+      point_values.colors = o3d.utility.Vector3dVector(int_color)  #point cloud with colors 
 
     def run_open3d():
       self.vis = o3d.visualization.Visualizer()
