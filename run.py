@@ -3,11 +3,11 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-import gym
+import gymnasium as gym
 import gym_carla
 import carla
-from stable_baselines import DQN
-from stable_baselines.deepq.policies import MlpPolicy
+from stable_baselines3 import DQN
+from stable_baselines3.deepq.policies import MlpPolicy
 
 def main():
   # parameters for the gym_carla environment
