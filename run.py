@@ -7,7 +7,6 @@ import gymnasium as gym
 import gym_carla
 import carla
 from stable_baselines3 import DQN
-from stable_baselines3.deepq.policies import MlpPolicy
 
 def main():
   # parameters for the gym_carla environment
@@ -37,16 +36,16 @@ def main():
   }
 
   # Set gym-carla environment
-  env = gym.make('carla-v0', params=params)
+  env = gym.make('carla-v0', params=params, env_id="GymEnv-v1")
 
-  model = DQN(MlpPolicy, env, verbose=1, tensorboard_log="./tensorboard/")
+  model = DQN('MlpPolicy', env, verbose=1, tensorboard_log="./tensorboard/")
   model.learn(total_timesteps=10000)
 
-  obs = env.reset()
+  obs, info = env.reset()
   i = 0
   while True:
     action, _states = model.predict(obs)
-    obs, rewards, dones, info = env.step(action)
+    obs, rewards, terminated, truncated, info = env.step(action)
     print(i)
     i += 1
 
