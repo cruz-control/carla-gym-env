@@ -25,9 +25,9 @@ import threading
 from skimage.transform import resize
 from PIL import Image
 
-import gym
-from gym import spaces
-from gym.utils import seeding
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding
 import carla
 
 from gym_carla.envs.render import BirdeyeRender
