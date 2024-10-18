@@ -57,8 +57,6 @@ class CarlaEnv(gym.Env):
     self.max_ego_spawn_times = params['max_ego_spawn_times']
     self.display_route = params['display_route']
 
-    
-
     # action and observation spaces
     self.discrete = params['discrete']
     self.discrete_act = [params['discrete_acc'], params['discrete_steer']] # acc, steer
@@ -121,7 +119,7 @@ class CarlaEnv(gym.Env):
     self.radar_bp.set_attribute('range', '100')                                   # Set detection range (meters)
     self.radar_bp.set_attribute('points_per_second', '15000')                     # Set scan frequency (points per second)
     self.radar_trans = carla.Transform(carla.Location(x=2.0, z=1.0))              # Set location of sensor relative to vehicle (meters)
-    
+
     # Camera sensor
     self.camera_img = np.zeros((4, self.obs_size, self.obs_size, 3), dtype = np.dtype("uint8"))
 
@@ -152,7 +150,7 @@ class CarlaEnv(gym.Env):
     # Initialize the renderer
     self._init_renderer()
 
-  def reset(self):
+  def reset(self, seed = None):
     # Clear sensor objects
     self.collision_sensor = None
     self.lidar_sensor = None
@@ -258,22 +256,22 @@ class CarlaEnv(gym.Env):
     def get_radar_data(radar_data, point_values):
       data = np.copy(np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4')))
       data = np.reshape(data, (len(radar_data), 4))
-      
-      #get velocity and make color map 
-      velocity = data[:,-1] #this is the velocity of objects coming towards the sensor 
+
+      #get velocity and make color map
+      velocity = data[:,-1] #this is the velocity of objects coming towards the sensor
       velocity_col = 1.0 - np.log(velocity) / np.log(np.exp(-0.004 * 100))
       int_color = np.c_[
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 0]),
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 1]),
           np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 2])]
-      
+
       # Isolate the 3D data
       points = data[:, :-1]
 
       points[:, :1] = -points[:, :1]
 
       point_values.points = o3d.utility.Vector3dVector(points)
-      point_values.colors = o3d.utility.Vector3dVector(int_color)  #point cloud with colors 
+      point_values.colors = o3d.utility.Vector3dVector(int_color)  #point cloud with colors
 
     def run_open3d():
       self.vis = o3d.visualization.Visualizer()
@@ -343,9 +341,11 @@ class CarlaEnv(gym.Env):
     self.routeplanner = RoutePlanner(self.ego, self.max_waypt)
     self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
 
+    info = self._get_info()
+
     # Set ego information for render
     self.birdeye_render.set_hero(self.ego, self.ego.id)
-    return self._get_obs()
+    return self._get_obs(), info
 
   def step(self, action):
     # Calculate acceleration and steering
@@ -406,17 +406,16 @@ class CarlaEnv(gym.Env):
     # route planner
     self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
 
-    # state information
-    info = {
-      'waypoints': self.waypoints,
-      'vehicle_front': self.vehicle_front
-    }
+    info = self._get_info()
+
+    # TODO episode truncates if last waypoint is reached
+    truncated = False
 
     # Update timesteps
     self.time_step += 1
     self.total_step += 1
 
-    return (self._get_obs(), self._get_reward(), self._terminal(), copy.deepcopy(info))
+    return (self._get_obs(), self._get_reward(), self._terminal(), truncated, info)
 
   def seed(self, seed=None):
     self.np_random, seed = seeding.np_random(seed)
@@ -696,3 +695,13 @@ class CarlaEnv(gym.Env):
           if actor.type_id == 'controller.ai.walker':
             actor.stop()
           actor.destroy()
+
+  def _get_info(self):
+    self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
+
+    # state information
+    info = {
+      'waypoints': self.waypoints,
+      'vehicle_front': self.vehicle_front
+    }
+    return info
