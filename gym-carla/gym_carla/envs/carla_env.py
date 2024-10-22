@@ -13,8 +13,7 @@ from __future__ import division
 import glob
 import os
 import sys
-from datetime import datetime
-from matplotlib import cm
+import math
 import open3d as o3d
 import copy
 import numpy as np
@@ -22,6 +21,9 @@ import pygame
 import random
 import time
 import threading
+
+from datetime import datetime
+from matplotlib import cm
 from skimage.transform import resize
 from PIL import Image
 
@@ -56,6 +58,8 @@ class CarlaEnv(gym.Env):
     self.desired_speed = params['desired_speed']
     self.max_ego_spawn_times = params['max_ego_spawn_times']
     self.display_route = params['display_route']
+
+
 
     # action and observation spaces
     self.discrete = params['discrete']
@@ -114,9 +118,9 @@ class CarlaEnv(gym.Env):
     # Radar sensor
     self.radar_data = None
     self.radar_bp = self.world.get_blueprint_library().find('sensor.other.radar') # Fetch the blueprint from CARLA's library
-    self.radar_bp.set_attribute('horizontal_fov', '30')                           # Set horizontal field of view's angle
-    self.radar_bp.set_attribute('vertical_fov', '20')                             # Set vertical field of view's angle
-    self.radar_bp.set_attribute('range', '100')                                   # Set detection range (meters)
+    self.radar_bp.set_attribute('horizontal_fov', str(35))                        # Set horizontal field of view's angle
+    self.radar_bp.set_attribute('vertical_fov', str(20))                          # Set vertical field of view's angle
+    self.radar_bp.set_attribute('range', str(20))                                 # Set detection range (meters)
     self.radar_bp.set_attribute('points_per_second', '15000')                     # Set scan frequency (points per second)
     self.radar_trans = carla.Transform(carla.Location(x=2.0, z=1.0))              # Set location of sensor relative to vehicle (meters)
 
@@ -251,27 +255,34 @@ class CarlaEnv(gym.Env):
 
     # Add radar sensor
     self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
-    self.point_values = o3d.geometry.PointCloud()
-    self.radar_sensor.listen(lambda data: get_radar_data(data,self.point_values))
-    def get_radar_data(radar_data, point_values):
-      data = np.copy(np.frombuffer(radar_data.raw_data, dtype=np.dtype('f4')))
-      data = np.reshape(data, (len(radar_data), 4))
+    self.radar_sensor.listen(lambda data: get_radar_data(data))
+    def get_radar_data(radar_data):
+      velocity_range = 7.5 # m/s
+      current_rot = radar_data.transform.rotation
+      for detect in radar_data:
+        azi = math.degrees(detect.azimuth)      # x
+        alt = math.degrees(detect.altitude)     # y
+        fw_vec = carla.Vector3D(x=detect.depth - 0.25)    # Adjust the distance slightly so the dots can be properly seen
+        carla.Transform(
+            carla.Location(),
+            carla.Rotation(
+                pitch=current_rot.pitch + alt,
+                yaw=current_rot.yaw + azi,
+                roll=current_rot.roll)).transform(fw_vec)
 
-      #get velocity and make color map
-      velocity = data[:,-1] #this is the velocity of objects coming towards the sensor
-      velocity_col = 1.0 - np.log(velocity) / np.log(np.exp(-0.004 * 100))
-      int_color = np.c_[
-          np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 0]),
-          np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 1]),
-          np.interp(velocity_col, VID_RANGE, VIRIDIS[:, 2])]
+        def clamp(min_v, max_v, value):
+            return max(min_v, min(value, max_v))
 
-      # Isolate the 3D data
-      points = data[:, :-1]
-
-      points[:, :1] = -points[:, :1]
-
-      point_values.points = o3d.utility.Vector3dVector(points)
-      point_values.colors = o3d.utility.Vector3dVector(int_color)  #point cloud with colors
+        norm_velocity = detect.velocity / velocity_range # range [-1, 1]
+        r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
+        g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
+        b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
+        self.world.debug.draw_point(
+            radar_data.transform.location + fw_vec,
+            size=0.075,
+            life_time=0.06,
+            persistent_lines=False,
+            color=carla.Color(r, g, b))
 
     def run_open3d():
       self.vis = o3d.visualization.Visualizer()
