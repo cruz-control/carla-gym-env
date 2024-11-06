@@ -229,29 +229,29 @@ class CarlaEnv(gym.Env):
         self.collision_hist.pop(0)
     self.collision_hist = []
 
-    # # Add LIDAR sensor
-    # self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
-    # #self.point_list = o3d.geometry.PointCloud()
-    # #self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
-    # def get_lidar_data(point_cloud, point_list):
-    #   data = np.copy(np.frombuffer(point_cloud.raw_data, dtype=np.dtype('f4')))
-    #   data = np.reshape(data, (int(data.shape[0] / 4), 4))
+    # Add LIDAR sensor
+    self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
+    #self.point_list = o3d.geometry.PointCloud()
+    #self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
+    def get_lidar_data(point_cloud, point_list):
+      data = np.copy(np.frombuffer(point_cloud.raw_data, dtype=np.dtype('f4')))
+      data = np.reshape(data, (int(data.shape[0] / 4), 4))
 
-    #   # Isolate the intensity and compute a color for it
-    #   intensity = data[:, -1]
-    #   intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
-    #   int_color = np.c_[
-    #       np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 0]),
-    #       np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 1]),
-    #       np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 2])]
+      # Isolate the intensity and compute a color for it
+      intensity = data[:, -1]
+      intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
+      int_color = np.c_[
+          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 0]),
+          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 1]),
+          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 2])]
 
-    #   # Isolate the 3D data
-    #   points = data[:, :-1]
+      # Isolate the 3D data
+      points = data[:, :-1]
 
-    #   points[:, :1] = -points[:, :1]
+      points[:, :1] = -points[:, :1]
 
-    #   point_list.points = o3d.utility.Vector3dVector(points)
-    #   point_list.colors = o3d.utility.Vector3dVector(int_color)
+      point_list.points = o3d.utility.Vector3dVector(points)
+      point_list.colors = o3d.utility.Vector3dVector(int_color)
 
     # Add radar sensor
     self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
@@ -284,24 +284,24 @@ class CarlaEnv(gym.Env):
             persistent_lines=False,
             color=carla.Color(r, g, b))
 
-    # def run_open3d():
-    #   self.vis = o3d.visualization.Visualizer()
-    #   self.vis.create_window(
-    #       window_name='Carla Lidar',
-    #       width=540,
-    #       height=540,
-    #       left=480,
-    #       top=270, visible=False)
-    #   self.vis.get_render_option().background_color = [0.05, 0.05, 0.05]
-    #   self.vis.get_render_option().point_size = 1
-    #   self.vis.get_render_option().show_coordinate_frame = True
+    def run_open3d():
+      self.vis = o3d.visualization.Visualizer()
+      self.vis.create_window(
+          window_name='Carla Lidar',
+          width=540,
+          height=540,
+          left=480,
+          top=270, visible=False)
+      self.vis.get_render_option().background_color = [0.05, 0.05, 0.05]
+      self.vis.get_render_option().point_size = 1
+      self.vis.get_render_option().show_coordinate_frame = True
 
-    #   self.frame = 0
-    #   self.dt0 = datetime.now()
+      self.frame = 0
+      self.dt0 = datetime.now()
 
 
-    # thread_open3d = threading.Thread(target=run_open3d)
-    # thread_open3d.start()
+    thread_open3d = threading.Thread(target=run_open3d)
+    thread_open3d.start()
 
 
     # Add camera sensors
