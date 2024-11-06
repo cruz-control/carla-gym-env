@@ -13,8 +13,7 @@ from __future__ import division
 import glob
 import os
 import sys
-from datetime import datetime
-from matplotlib import cm
+import math
 import open3d as o3d
 import copy
 import numpy as np
@@ -22,12 +21,15 @@ import pygame
 import random
 import time
 import threading
+
+from datetime import datetime
+from matplotlib import cm
 from skimage.transform import resize
 from PIL import Image
 
-import gym
-from gym import spaces
-from gym.utils import seeding
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding
 import carla
 
 from gym_carla.envs.render import BirdeyeRender
@@ -57,7 +59,7 @@ class CarlaEnv(gym.Env):
     self.max_ego_spawn_times = params['max_ego_spawn_times']
     self.display_route = params['display_route']
 
-    
+
 
     # action and observation spaces
     self.discrete = params['discrete']
@@ -101,7 +103,7 @@ class CarlaEnv(gym.Env):
     self.collision_hist_l = 1 # collision history length
     self.collision_bp = self.world.get_blueprint_library().find('sensor.other.collision')
 
-    # Lidar sensor
+    # LIDAR sensor
     self.lidar_data = None
     self.lidar_height = 1.8
     self.lidar_trans = carla.Transform(carla.Location(x=-0.5, z=self.lidar_height))
@@ -113,6 +115,14 @@ class CarlaEnv(gym.Env):
     self.lidar_bp.set_attribute('rotation_frequency', str(1.0 / 0.05))
     self.lidar_bp.set_attribute('points_per_second', '500000')
 
+    # Radar sensor
+    self.radar_data = None
+    self.radar_bp = self.world.get_blueprint_library().find('sensor.other.radar') # Fetch the blueprint from CARLA's library
+    self.radar_bp.set_attribute('horizontal_fov', str(35))                        # Set horizontal field of view's angle
+    self.radar_bp.set_attribute('vertical_fov', str(20))                          # Set vertical field of view's angle
+    self.radar_bp.set_attribute('range', str(20))                                 # Set detection range (meters)
+    self.radar_bp.set_attribute('points_per_second', '15000')                     # Set scan frequency (points per second)
+    self.radar_trans = carla.Transform(carla.Location(x=2.0, z=1.0))              # Set location of sensor relative to vehicle (meters)
 
     # Camera sensor
     self.camera_img = np.zeros((4, self.obs_size, self.obs_size, 3), dtype = np.dtype("uint8"))
@@ -144,7 +154,7 @@ class CarlaEnv(gym.Env):
     # Initialize the renderer
     self._init_renderer()
 
-  def reset(self):
+  def reset(self, seed = None):
     # Clear sensor objects
     self.collision_sensor = None
     self.lidar_sensor = None
@@ -152,6 +162,7 @@ class CarlaEnv(gym.Env):
     self.camera2_sensor = None
     self.camera3_sensor = None
     self.camera4_sensor = None
+    self.radar_sensor = None #cleared radar
 
     # Delete sensors, vehicles and walkers
     self._clear_all_actors(['sensor.other.collision', 'sensor.lidar.ray_cast', 'sensor.camera.rgb', 'vehicle.*', 'controller.ai.walker', 'walker.*'])
@@ -218,10 +229,10 @@ class CarlaEnv(gym.Env):
         self.collision_hist.pop(0)
     self.collision_hist = []
 
-    # Add lidar sensor
+    # Add LIDAR sensor
     self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
-    self.point_list = o3d.geometry.PointCloud()
-    self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
+    #self.point_list = o3d.geometry.PointCloud()
+    #self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
     def get_lidar_data(point_cloud, point_list):
       data = np.copy(np.frombuffer(point_cloud.raw_data, dtype=np.dtype('f4')))
       data = np.reshape(data, (int(data.shape[0] / 4), 4))
@@ -241,6 +252,37 @@ class CarlaEnv(gym.Env):
 
       point_list.points = o3d.utility.Vector3dVector(points)
       point_list.colors = o3d.utility.Vector3dVector(int_color)
+
+    # Add radar sensor
+    self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
+    self.radar_sensor.listen(lambda data: get_radar_data(data))
+    def get_radar_data(radar_data):
+      velocity_range = 7.5 # m/s
+      current_rot = radar_data.transform.rotation
+      for detect in radar_data:
+        azi = math.degrees(detect.azimuth)      # x
+        alt = math.degrees(detect.altitude)     # y
+        fw_vec = carla.Vector3D(x=detect.depth - 0.25)    # Adjust the distance slightly so the dots can be properly seen
+        carla.Transform(
+            carla.Location(),
+            carla.Rotation(
+                pitch=current_rot.pitch + alt,
+                yaw=current_rot.yaw + azi,
+                roll=current_rot.roll)).transform(fw_vec)
+
+        def clamp(min_v, max_v, value):
+            return max(min_v, min(value, max_v))
+
+        norm_velocity = detect.velocity / velocity_range # range [-1, 1]
+        r = int(clamp(0.0, 1.0, 1.0 - norm_velocity) * 255.0)
+        g = int(clamp(0.0, 1.0, 1.0 - abs(norm_velocity)) * 255.0)
+        b = int(abs(clamp(- 1.0, 0.0, - 1.0 - norm_velocity)) * 255.0)
+        self.world.debug.draw_point(
+            radar_data.transform.location + fw_vec,
+            size=0.075,
+            life_time=0.06,
+            persistent_lines=False,
+            color=carla.Color(r, g, b))
 
     def run_open3d():
       self.vis = o3d.visualization.Visualizer()
@@ -264,13 +306,13 @@ class CarlaEnv(gym.Env):
 
     # Add camera sensors
     self.camera_sensor = self.world.spawn_actor(self.camera_bp, self.camera_trans, attach_to=self.ego)
-    self.camera_sensor.listen(lambda data: get_camera_img(data))
+    
     self.camera_sensor2 = self.world.spawn_actor(self.camera_bp, self.camera_trans2, attach_to=self.ego)
-    self.camera_sensor2.listen(lambda data: get_camera_img2(data))
+   
     self.camera_sensor3 = self.world.spawn_actor(self.camera_bp, self.camera_trans3, attach_to=self.ego)
-    self.camera_sensor3.listen(lambda data: get_camera_img3(data))
+    
     self.camera_sensor4 = self.world.spawn_actor(self.camera_bp, self.camera_trans4, attach_to=self.ego)
-    self.camera_sensor4.listen(lambda data: get_camera_img4(data))
+    
 
     def get_camera_img(data):
       array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
@@ -299,6 +341,11 @@ class CarlaEnv(gym.Env):
       array = array[:, :, :3]
       array = array[:, :, ::-1]
       self.camera_img[3] = array
+    
+    self.camera_sensor.listen(lambda data: get_camera_img(data))
+    self.camera_sensor2.listen(lambda data: get_camera_img2(data))
+    self.camera_sensor3.listen(lambda data: get_camera_img3(data))
+    self.camera_sensor4.listen(lambda data: get_camera_img4(data))
     # Update timesteps
     self.time_step=0
     self.reset_step+=1
@@ -310,9 +357,11 @@ class CarlaEnv(gym.Env):
     self.routeplanner = RoutePlanner(self.ego, self.max_waypt)
     self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
 
+    info = self._get_info()
+
     # Set ego information for render
     self.birdeye_render.set_hero(self.ego, self.ego.id)
-    return self._get_obs()
+    return self._get_obs(), info
 
   def step(self, action):
     # Calculate acceleration and steering
@@ -335,30 +384,30 @@ class CarlaEnv(gym.Env):
     act = carla.VehicleControl(throttle=float(throttle), steer=float(-steer), brake=float(brake))
     self.ego.apply_control(act)
 
-    def update_open3d():
-      if self.frame == 2:
-          self.vis.add_geometry(self.point_list)
-      self.vis.update_geometry(self.point_list)
+    # def update_open3d():
+    #   if self.frame == 2:
+    #       self.vis.add_geometry(self.point_list)
+    #   self.vis.update_geometry(self.point_list)
 
-      self.vis.poll_events()
-      self.vis.update_renderer()
-      self.vis.capture_screen_image(filename="lidar_temp_img.png")
+    #   self.vis.poll_events()
+    #   self.vis.update_renderer()
+    #   self.vis.capture_screen_image(filename="lidar_temp_img.png")
 
 
-    thread_update3d = threading.Thread(target=update_open3d)
-    thread_update3d.start()
+    # thread_update3d = threading.Thread(target=update_open3d)
+    # thread_update3d.start()
          # This can fix Open3D jittering issues:
-    time.sleep(0.005)
+    # time.sleep(0.005)
 
 
     self.world.tick()
 
 
-    process_time = datetime.now() - self.dt0
-    sys.stdout.write('\r' + 'FPS: ' + str(1.0 / process_time.total_seconds()))
-    sys.stdout.flush()
-    self.dt0 = datetime.now()
-    self.frame += 1
+    # #process_time = datetime.now() - self.dt0
+    # sys.stdout.write('\r' + 'FPS: ' + str(1.0 / process_time.total_seconds()))
+    # sys.stdout.flush()
+    # #self.dt0 = datetime.now()
+    # self.frame += 1
 
     # Append actors polygon list
     vehicle_poly_dict = self._get_actor_polygons('vehicle.*')
@@ -373,17 +422,16 @@ class CarlaEnv(gym.Env):
     # route planner
     self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
 
-    # state information
-    info = {
-      'waypoints': self.waypoints,
-      'vehicle_front': self.vehicle_front
-    }
+    info = self._get_info()
+
+    # TODO episode truncates if last waypoint is reached
+    truncated = False
 
     # Update timesteps
     self.time_step += 1
     self.total_step += 1
 
-    return (self._get_obs(), self._get_reward(), self._terminal(), copy.deepcopy(info))
+    return (self._get_obs(), self._get_reward(), self._terminal(), truncated, info)
 
   def seed(self, seed=None):
     self.np_random, seed = seeding.np_random(seed)
@@ -663,3 +711,13 @@ class CarlaEnv(gym.Env):
           if actor.type_id == 'controller.ai.walker':
             actor.stop()
           actor.destroy()
+
+  def _get_info(self):
+    self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
+
+    # state information
+    info = {
+      'waypoints': self.waypoints,
+      'vehicle_front': self.vehicle_front
+    }
+    return info

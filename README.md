@@ -3,7 +3,7 @@ These files consist of a CARLA gym environment, based on the [gym-carla](https:/
 The run.py file runs a DQN algorithm from [Stable Baselines](https://stable-baselines.readthedocs.io/en/master/), using the gym environment. Steps to use this environment:
 
 1. Download and run the latest version of CARLA. This environment was tested on CARLA v0.9.15
-2. Create and activate a conda environment. (This environment was tested on python 3.7)
+2. Create and activate a conda environment. (This environment was tested on python 3.8)
 3. Clone the repo and cd into the gym-carla folder.
 Run the following:
 4. pip3 install -r requirements.txt

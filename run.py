@@ -3,11 +3,10 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-import gym
+import gymnasium as gym
 import gym_carla
 import carla
-from stable_baselines import DQN
-from stable_baselines.deepq.policies import MlpPolicy
+from stable_baselines3 import DQN
 
 def main():
   # parameters for the gym_carla environment
@@ -39,14 +38,14 @@ def main():
   # Set gym-carla environment
   env = gym.make('carla-v0', params=params)
 
-  model = DQN(MlpPolicy, env, verbose=1, tensorboard_log="./tensorboard/")
+  model = DQN('MlpPolicy', env, verbose=1, tensorboard_log="./tensorboard/")
   model.learn(total_timesteps=10000)
 
-  obs = env.reset()
+  obs, info = env.reset()
   i = 0
   while True:
     action, _states = model.predict(obs)
-    obs, rewards, dones, info = env.step(action)
+    obs, rewards, terminated, truncated, info = env.step(action)
     print(i)
     i += 1
 
