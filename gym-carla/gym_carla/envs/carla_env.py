@@ -1,12 +1,4 @@
-# This file is modified from <https://github.com/cjy1992/gym-carla.git>:
-# Copyright (c) 2019: Jianyu Chen (jianyuchen@berkeley.edu)
-# This work is licensed under the terms of the MIT license.
-# For a copy, see <https://opensource.org/licenses/MIT>.
-
-# This file utilizes, with modification, LIDAR code from the CARLA Python examples library:
-# Copyright (c) 2020 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB).
-# This work is licensed under the terms of the MIT license.
-# For a copy, see <https://opensource.org/licenses/MIT>.
+# Based off gym_carla with several modifications
 
 from __future__ import division
 
@@ -31,7 +23,7 @@ from gym.utils import seeding
 import carla
 
 from gym_carla.envs.render import BirdeyeRender
-from gym_carla.envs.route_planner import RoutePlanner
+from gym_carla.envs.route_planner import RoutePlanner, RoadOption
 from gym_carla.envs.misc import *
 
 VIRIDIS = np.array(cm.get_cmap('plasma').colors)
@@ -57,7 +49,7 @@ class CarlaEnv(gym.Env):
     self.max_ego_spawn_times = params['max_ego_spawn_times']
     self.display_route = params['display_route']
 
-    
+
 
     # action and observation spaces
     self.discrete = params['discrete']
@@ -71,7 +63,7 @@ class CarlaEnv(gym.Env):
       params['continuous_steer_range'][0]]), np.array([params['continuous_accel_range'][1],
       params['continuous_steer_range'][1]]), dtype=np.float32)  # acc, steer
 
-    self.observation_space = spaces.Box(low=0, high=255, shape=(5, self.obs_size, self.obs_size, 3), dtype=np.float32)
+    self.observation_space = spaces.Box(low=0, high=255, shape=(self.obs_size, self.obs_size, 4), dtype=np.uint8)
 
     # Connect to carla server and get world object
     print('connecting to Carla server...')
@@ -94,35 +86,19 @@ class CarlaEnv(gym.Env):
         self.walker_spawn_points.append(spawn_point)
 
     # Create the ego vehicle blueprint
-    self.ego_bp = self._create_vehicle_bluepprint(params['ego_vehicle_filter'], color='49,8,8')
+    self.ego_bp = self._create_vehicle_bluepprint(params['ego_vehicle_filter'], color='242,250,12')
 
     # Collision sensor
     self.collision_hist = [] # The collision history
     self.collision_hist_l = 1 # collision history length
     self.collision_bp = self.world.get_blueprint_library().find('sensor.other.collision')
 
-    # Lidar sensor
-    self.lidar_data = None
-    self.lidar_height = 1.8
-    self.lidar_trans = carla.Transform(carla.Location(x=-0.5, z=self.lidar_height))
-    self.lidar_bp = self.world.get_blueprint_library().find('sensor.lidar.ray_cast')
-    self.lidar_bp.set_attribute('channels', '64.0')
-    self.lidar_bp.set_attribute('range', '100.0')
-    self.lidar_bp.set_attribute('upper_fov', '15')
-    self.lidar_bp.set_attribute('lower_fov', '-25')
-    self.lidar_bp.set_attribute('rotation_frequency', str(1.0 / 0.05))
-    self.lidar_bp.set_attribute('points_per_second', '500000')
+    self.past_img = []
 
-    # Radar sensor
-    self.radar_bp = self.world.get_blueprint_library().find('sensor.other.radar')
-    self.radar_bp.set_attribute('horizontal_fov', '30.0')
-    self.radar_bp.set_attribute('vertical_fov', '30.0')
-    self.radar_bp.set_attribute('points_per_second', '10000')
-    self.radar_trans = carla.Transform(carla.Location(z=2))  # Change this location later
 
 
     # Camera sensor
-    self.camera_img = np.zeros((4, self.obs_size, self.obs_size, 3), dtype = np.dtype("uint8"))
+    self.camera_img = np.zeros((4, self.obs_size, self.obs_size), dtype=np.uint8)
 
     self.camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
     # Modify the attributes of the blueprint to set image resolution and field of view.
@@ -133,12 +109,6 @@ class CarlaEnv(gym.Env):
     self.camera_bp.set_attribute('sensor_tick', '0.02')
 
     self.camera_trans = carla.Transform(carla.Location(x=1.5, z=1.5))
-
-    self.camera_trans2 = carla.Transform(carla.Location(x=0.7, y=0.9, z=1), carla.Rotation(pitch=-35.0, yaw=134.0))
-
-    self.camera_trans3 = carla.Transform(carla.Location(x=0.7, y=-0.9, z=1), carla.Rotation(pitch=-35.0, yaw=-134.0))
-
-    self.camera_trans4 = carla.Transform(carla.Location(x=-1.5, z=1.5), carla.Rotation(yaw=180.0))
 
     # Set fixed simulation step for synchronous mode
     self.settings = self.world.get_settings()
@@ -154,11 +124,8 @@ class CarlaEnv(gym.Env):
   def reset(self):
     # Clear sensor objects
     self.collision_sensor = None
-    self.lidar_sensor = None
     self.camera_sensor = None
-    self.camera2_sensor = None
-    self.camera3_sensor = None
-    self.camera4_sensor = None
+
 
     # Delete sensors, vehicles and walkers
     self._clear_all_actors(['sensor.other.collision', 'sensor.lidar.ray_cast', 'sensor.camera.rgb', 'vehicle.*', 'controller.ai.walker', 'walker.*'])
@@ -225,117 +192,28 @@ class CarlaEnv(gym.Env):
         self.collision_hist.pop(0)
     self.collision_hist = []
 
-    # Add radar sensor
-    self.radar_sensor = self.world.spawn_actor(self.radar_bp, self.radar_trans, attach_to=self.ego)
-    self.radar_list = o3d.geometry.PointCloud()
-    self.radar_sensor.listen(lambda data: get_radar_data(data, self.radar_list))
-    def get_radar_data(data, point_list):
-      COOL_RANGE = np.linspace[0.0, 1.0, VIRIDIS.shape[0]]
-      COOL = np.array(cm.get_cmap('winter')[COOL_RANGE])
-      COOL = COOL[:,:3]
-      radar_data = np.zeros((len(data), 4))
-
-      for i, detection in enumerate(data):
-        x = detection.depth * math.cos(detection.altitude) * math.cos(detection.azimuth)
-        y = detection.depth * math.cos(detection.altitude) * math.sin(detection.azimuth)
-        z = detection.depth * math.sin(detection.altitude)
-
-        radar_data[i, :] = [x, y, z, detection.velocity]
-      intensity = np.abs(radar_data[:, -1])
-      intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
-      int_color = np.c_[
-        np.interp(intensity_col, COOL_RANGE, COOL[:, 0]),
-        np.interp(intensity_col, COOL_RANGE, COOL[:, 1]),
-        np.interp(intensity_col, COOL_RANGE, COOL[:, 2]),
-      ]
-
-      points = radar_data[:, :-1]
-      points[:, :1] = -points[:, :1]
-      point_list.points = o3d.utility.Vector3dVector(points)
-      point_list.colors = o3d.utility.Vector3dVector(int_color)
-
-      
-    # Add lidar sensor
-    self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
-    self.point_list = o3d.geometry.PointCloud()
-    self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
-    def get_lidar_data(point_cloud, point_list):
-      data = np.copy(np.frombuffer(point_cloud.raw_data, dtype=np.dtype('f4')))
-      data = np.reshape(data, (int(data.shape[0] / 4), 4))
-
-      # Isolate the intensity and compute a color for it
-      intensity = data[:, -1]
-      intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
-      int_color = np.c_[
-          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 0]),
-          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 1]),
-          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 2])]
-
-      # Isolate the 3D data
-      points = data[:, :-1]
-
-      points[:, :1] = -points[:, :1]
-
-      point_list.points = o3d.utility.Vector3dVector(points)
-      point_list.colors = o3d.utility.Vector3dVector(int_color)
-
-    def run_open3d():
-      self.vis = o3d.visualization.Visualizer()
-      self.vis.create_window(
-          window_name='Carla Lidar',
-          width=540,
-          height=540,
-          left=480,
-          top=270, visible=False)
-      self.vis.get_render_option().background_color = [0.05, 0.05, 0.05]
-      self.vis.get_render_option().point_size = 1
-      self.vis.get_render_option().show_coordinate_frame = True
-
-      self.frame = 0
-      self.dt0 = datetime.now()
-
-
-    thread_open3d = threading.Thread(target=run_open3d)
-    thread_open3d.start()
-
 
     # Add camera sensors
     self.camera_sensor = self.world.spawn_actor(self.camera_bp, self.camera_trans, attach_to=self.ego)
     self.camera_sensor.listen(lambda data: get_camera_img(data))
-    self.camera_sensor2 = self.world.spawn_actor(self.camera_bp, self.camera_trans2, attach_to=self.ego)
-    self.camera_sensor2.listen(lambda data: get_camera_img2(data))
-    self.camera_sensor3 = self.world.spawn_actor(self.camera_bp, self.camera_trans3, attach_to=self.ego)
-    self.camera_sensor3.listen(lambda data: get_camera_img3(data))
-    self.camera_sensor4 = self.world.spawn_actor(self.camera_bp, self.camera_trans4, attach_to=self.ego)
-    self.camera_sensor4.listen(lambda data: get_camera_img4(data))
 
     def get_camera_img(data):
-      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
+      array = np.frombuffer(data.raw_data, dtype=np.uint8)
       array = np.reshape(array, (data.height, data.width, 4))
       array = array[:, :, :3]
       array = array[:, :, ::-1]
+      # Grayscale
+      array = np.mean(array, axis=2)
+      array = array.astype(np.uint8)
       self.camera_img[0] = array
+      while len(self.past_img) < 3:
+        self.past_img.append(array)
+      for i in range(3):
+        self.camera_img[i+1] = self.past_img[i]
+      self.past_img.pop()
+      self.past_img.insert(0, array)
 
-    def get_camera_img2(data):
-      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
-      array = np.reshape(array, (data.height, data.width, 4))
-      array = array[:, :, :3]
-      array = array[:, :, ::-1]
-      self.camera_img[1] = array
 
-    def get_camera_img3(data):
-      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
-      array = np.reshape(array, (data.height, data.width, 4))
-      array = array[:, :, :3]
-      array = array[:, :, ::-1]
-      self.camera_img[2] = array
-
-    def get_camera_img4(data):
-      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
-      array = np.reshape(array, (data.height, data.width, 4))
-      array = array[:, :, :3]
-      array = array[:, :, ::-1]
-      self.camera_img[3] = array
     # Update timesteps
     self.time_step=0
     self.reset_step+=1
@@ -346,6 +224,16 @@ class CarlaEnv(gym.Env):
 
     self.routeplanner = RoutePlanner(self.ego, self.max_waypt)
     self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
+
+    self.last_waypoint = self.waypoints[0]
+    ego_x, ego_y = get_pos(self.ego)
+    self.last_distance = (ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2
+    self.last_lane_distance, w = get_lane_dis(self.waypoints, ego_x, ego_y)
+
+    for _,direction in self.waypoints:
+      if direction != RoadOption.LANEFOLLOW:
+        print(direction)
+        break
 
     # Set ego information for render
     self.birdeye_render.set_hero(self.ego, self.ego.id)
@@ -372,30 +260,11 @@ class CarlaEnv(gym.Env):
     act = carla.VehicleControl(throttle=float(throttle), steer=float(-steer), brake=float(brake))
     self.ego.apply_control(act)
 
-    def update_open3d():
-      if self.frame == 2:
-          self.vis.add_geometry(self.point_list)
-      self.vis.update_geometry(self.point_list)
-
-      self.vis.poll_events()
-      self.vis.update_renderer()
-      self.vis.capture_screen_image(filename="lidar_temp_img.png")
-
-
-    thread_update3d = threading.Thread(target=update_open3d)
-    thread_update3d.start()
-         # This can fix Open3D jittering issues:
-    time.sleep(0.005)
+    carPos = self.ego.get_transform()
+    self.world.get_spectator().set_transform(carla.Transform(carla.Location(carPos.location.x, carPos.location.y, 50), carla.Rotation(300,carPos.rotation.yaw,0)))
 
 
     self.world.tick()
-
-
-    process_time = datetime.now() - self.dt0
-    sys.stdout.write('\r' + 'FPS: ' + str(1.0 / process_time.total_seconds()))
-    sys.stdout.flush()
-    self.dt0 = datetime.now()
-    self.frame += 1
 
     # Append actors polygon list
     vehicle_poly_dict = self._get_actor_polygons('vehicle.*')
@@ -454,7 +323,7 @@ class CarlaEnv(gym.Env):
     """
     pygame.init()
     self.display = pygame.display.set_mode(
-    (self.display_size * 6, self.display_size),
+    (self.display_size * 5, self.display_size),
     pygame.HWSURFACE | pygame.DOUBLEBUF)
 
     pixels_per_meter = self.display_size / self.obs_range
@@ -595,30 +464,67 @@ class CarlaEnv(gym.Env):
     birdeye_surface = rgb_to_display_surface(birdeye, self.display_size)
     self.display.blit(birdeye_surface, (0, 0))
 
+    # Direction
+    intersect_option = 0
+    for location,direction in self.waypoints:
+      self.world.debug.draw_point(carla.Location(location[0],location[1],1),life_time=1)
+      if intersect_option == 0 and direction != RoadOption.LANEFOLLOW:
+        intersect_option = direction
 
-    img = Image.open("lidar_temp_img.png")
-    self.lidar_img = np.array(img)
-    lidar_arr = np.zeros((1, self.obs_size, self.obs_size, 3))
-    lidar_arr = lidar_arr.astype(np.float32)
-    lidar_arr[0] = resize(self.lidar_img, (self.obs_size, self.obs_size, 3)) * 255
-    lidar_surface = rgb_to_display_surface(lidar_arr[0], self.display_size)
-    self.display.blit(lidar_surface, (self.display_size * 1, 0))
+    img = None
+    if intersect_option == 0:
+      img = Image.open("lane.jpg")
+    elif intersect_option == 1:
+      img = Image.open("left.jpg")
+    elif intersect_option == 2:
+      img = Image.open("right.png")
+    else:
+      img = Image.open("straight.png")
+    self.sign_img = np.array(img)
+    self.sign_img = np.mean(self.sign_img, axis=2)
+    self.sign_img = self.sign_img.astype(np.uint8)
+    sign_arr = resize(self.sign_img, (self.obs_size//8, self.obs_size//8), preserve_range=True)
+    sign_arr = sign_arr.astype(np.uint8)
+    self.sign_img = Image.fromarray(sign_arr)
 
     ## Display camera image
-    camera = resize(self.camera_img, (4, self.obs_size, self.obs_size, 3)) * 255
-    camera = camera.astype(np.float32)
+    camera = resize(self.camera_img, (4, self.obs_size, self.obs_size), preserve_range=True)
+    camera = camera.astype(np.uint8)
 
-    camera_surface = rgb_to_display_surface(camera[0], self.display_size)
+    temp = Image.fromarray(camera[0])
+    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
+    camera[0] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+
+    temp = Image.fromarray(camera[1])
+    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
+    camera[1] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+
+    temp = Image.fromarray(camera[2])
+    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
+    camera[2] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+
+    temp = Image.fromarray(camera[3])
+    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
+    camera[3] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+
+    camera_surface = grayscale_to_display_surface(camera[0], self.display_size)
+    self.display.blit(camera_surface, (self.display_size * 1, 0))
+
+    camera_surface = grayscale_to_display_surface(camera[1], self.display_size)
+    self.display.blit(camera_surface, (self.display_size * 2, 0))
+
+    camera_surface = grayscale_to_display_surface(camera[2], self.display_size)
     self.display.blit(camera_surface, (self.display_size * 3, 0))
 
-    camera_surface2 = rgb_to_display_surface(camera[1], self.display_size)
-    self.display.blit(camera_surface2, (self.display_size * 2, 0))
+    camera_surface = grayscale_to_display_surface(camera[3], self.display_size)
+    self.display.blit(camera_surface, (self.display_size * 4, 0))
 
-    camera_surface3 = rgb_to_display_surface(camera[2], self.display_size)
-    self.display.blit(camera_surface3, (self.display_size * 4, 0))
 
-    camera_surface4 = rgb_to_display_surface(camera[3], self.display_size)
-    self.display.blit(camera_surface4, (self.display_size * 5, 0))
+    #direction_arr = np.zeros((1, self.obs_size, self.obs_size), dtype=np.uint8)
+    #direction_arr[0][0 if intersect_option % 2 == 0 else -1][0 if intersect_option // 2 == 0 else -1] = 255
+    #direction_arr = direction_arr.astype(np.uint8)
+
+
 
     # Display on pygame
     pygame.display.flip()
@@ -626,48 +532,72 @@ class CarlaEnv(gym.Env):
 
     obs = {
       'camera':camera,
-      'lidar':lidar_arr,
-      'birdeye':birdeye.astype(np.uint8)
+      'birdeye':birdeye.astype(np.uint8),
     }
 
-
-    return np.concatenate((obs['camera'],obs['lidar']))
+    return np.transpose(obs['camera'], (1,2,0))
 
   def _get_reward(self):
     """Calculate the step reward."""
     # reward for speed tracking
     v = self.ego.get_velocity()
     speed = np.sqrt(v.x**2 + v.y**2)
-    r_speed = -abs(speed - self.desired_speed)
+    #r_speed = -300 * (abs(speed - self.desired_speed)**2)
+    #r_speed = 0
 
     # reward for collision
     r_collision = 0
     if len(self.collision_hist) > 0:
-      r_collision = -1
+      r_collision = -100000
 
     # reward for steering:
-    r_steer = -self.ego.get_control().steer**2
+    #r_steer = -self.ego.get_control().steer**2
 
     # reward for out of lane
     ego_x, ego_y = get_pos(self.ego)
     dis, w = get_lane_dis(self.waypoints, ego_x, ego_y)
+    #r_lane_dis = -100 * (abs(dis)**2)
+    if abs(dis) < 0.5:
+      r_lane_dis = 10000
+    elif abs(dis) < abs(self.last_lane_distance):
+      r_lane_dis = 5000
+    else:
+      r_lane_dis = -5000
+    self.last_lane_distance = dis
+
     r_out = 0
     if abs(dis) > self.out_lane_thres:
-      r_out = -1
+      r_out = -100000
 
     # longitudinal speed
-    lspeed = np.array([v.x, v.y])
-    lspeed_lon = np.dot(lspeed, w)
+    #lspeed = np.array([v.x, v.y])
+    #lspeed_lon = np.dot(lspeed, w)
 
-    # cost for too fast
-    r_fast = 0
-    if lspeed_lon > self.desired_speed:
-      r_fast = -1
 
-    # cost for lateral acceleration
-    r_lat = - abs(self.ego.get_control().steer) * lspeed_lon**2
+    # cost for stopped
+    r_speed = 0
+    if speed < 3:
+      r_speed = -6000
 
-    r = 200*r_collision + 5*r_speed + 10*r_fast + 2*r_out + r_steer*5 + 0.2*r_lat - 0.1
+    r_waypoint = 0
+    if (self.waypoints[0] != self.last_waypoint):
+      r_waypoint = 10000
+      self.last_waypoint = self.waypoints[0]
+      self.last_distance = (ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2
+    else:
+      if ((ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2) < self.last_distance:
+        self.last_distance = (ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2
+        r_waypoint = 5000
+      else:
+        r_waypoint = -1000
+
+    print("Collision: " + str(r_collision) + "\n")
+    print("Speed: " + str(r_speed) + "\n")
+    print("Out: " + str(r_out) + "\n")
+    print("Waypoint: " + str(r_waypoint) + "\n")
+    print("Lane Dis: " + str(r_lane_dis) + "-----True Value: " + str(dis))
+    print("\n-----------------------------------------------")
+    r = r_collision + r_speed + r_out - 200 + r_waypoint + r_lane_dis
 
     return r
 
