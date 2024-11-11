@@ -227,6 +227,7 @@ class CarlaEnv(gym.Env):
 
     self.last_waypoint = self.waypoints[0]
     ego_x, ego_y = get_pos(self.ego)
+    
     self.last_distance = (ego_x-self.waypoints[1][0])**2 + (ego_y-self.waypoints[1][1])**2
     self.last_lane_distance, w = get_lane_dis(self.waypoints, ego_x, ego_y)
 
