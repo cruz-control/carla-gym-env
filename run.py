@@ -3,11 +3,10 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-import gym
+import gymnasium as gym
 import gym_carla
 import carla
-from stable_baselines import DQN
-from stable_baselines.deepq.policies import MlpPolicy
+from stable_baselines3 import SAC
 
 def main():
   # parameters for the gym_carla environment
@@ -17,7 +16,7 @@ def main():
     'display_size': 256,  # screen size of bird-eye render
     'max_past_step': 1,  # the number of past steps to draw
     'dt': 0.1,  # time interval between two frames
-    'discrete': True,  # whether to use discrete control space
+    'discrete': False,  # whether to use discrete control space
     'discrete_acc': [-3.0, 0.0, 3.0],  # discrete value of accelerations
     'discrete_steer': [-0.2, 0.0, 0.2],  # discrete value of steering angles
     'continuous_accel_range': [-3.0, 3.0],  # continuous acceleration range
@@ -33,22 +32,24 @@ def main():
     'out_lane_thres': 2.0,  # threshold for out of lane
     'desired_speed': 8,  # desired speed (m/s)
     'max_ego_spawn_times': 200,  # maximum times to spawn ego vehicle
-    'display_route': True,  # whether to render the desired route
+    'display_route': False,  # whether to render the desired route
   }
 
   # Set gym-carla environment
   env = gym.make('carla-v0', params=params)
 
-  model = DQN(MlpPolicy, env, verbose=1, tensorboard_log="./tensorboard/")
-  model.learn(total_timesteps=10000)
+  model = SAC("MlpPolicy", env, device="cuda", buffer_size=30000, verbose=1, tensorboard_log="./tensorboard_DQN/")
+  model.learn(total_timesteps=5000)
+  model.save("SAC")
 
-  obs = env.reset()
-  i = 0
-  while True:
-    action, _states = model.predict(obs)
-    obs, rewards, dones, info = env.step(action)
-    print(i)
-    i += 1
+  # obs, info = env.reset()
+  # i = 0
+  
+  # while True:
+  #   action, _states = model.predict(obs)
+  #   obs, reward, terminated, truncated, info = env.step(action)
+  #   if terminated or truncated:
+  #       obs, info = env.reset()
 
 if __name__ == '__main__':
   main()

@@ -1,4 +1,12 @@
-# Based off gym_carla with several modifications
+# This file is modified from <https://github.com/cjy1992/gym-carla.git>:
+# Copyright (c) 2019: Jianyu Chen (jianyuchen@berkeley.edu)
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+# This file utilizes, with modification, LIDAR code from the CARLA Python examples library:
+# Copyright (c) 2020 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB).
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
 
 from __future__ import division
 
@@ -10,28 +18,154 @@ from matplotlib import cm
 import open3d as o3d
 import copy
 import numpy as np
-import pygame
+# import pygame
 import random
 import time
 import threading
 from skimage.transform import resize
 from PIL import Image
+from queue import PriorityQueue
 
-import gym
-from gym import spaces
-from gym.utils import seeding
+import gymnasium as gym
+from gymnasium import spaces
+from gymnasium.utils import seeding
 import carla
 
-from gym_carla.envs.render import BirdeyeRender
-from gym_carla.envs.route_planner import RoutePlanner, RoadOption
+# from gym_carla.envs.render import BirdeyeRender
+from gym_carla.envs.route_planner import RoutePlanner
 from gym_carla.envs.misc import *
+from enum import Enum
 
 VIRIDIS = np.array(cm.get_cmap('plasma').colors)
 VID_RANGE = np.linspace(0.0, 1.0, VIRIDIS.shape[0])
+
+class Turn(Enum):
+    LEFT = 1
+    STRAIGHT = 2
+    RIGHT = 3
+
+
+def get_closest_waypoint(route, curr_location):
+  closest_waypoint = None
+  previous_dist = None
+  i = None
+  
+  for i, waypoint in enumerate(route):
+    if closest_waypoint is None:
+      closest_waypoint = waypoint
+      previous_dist = waypoint.transform.location.distance(curr_location)
+      i = i
+      continue
+    
+    dist =  waypoint.transform.location.distance(curr_location)
+    
+    if dist < previous_dist:
+      closest_waypoint = waypoint
+      previous_dist = dist
+    
+    return i, closest_waypoint, previous_dist
+
+def euclidean_heuristic(waypoint, end_waypoint):
+    return waypoint.transform.location.distance(end_waypoint.transform.location)
+
+def manhattan_heuristic(waypoint, end_waypoint):
+    dx = abs(waypoint.transform.location.x - end_waypoint.transform.location.x)
+    dy = abs(waypoint.transform.location.y - end_waypoint.transform.location.y)
+    dz = abs(waypoint.transform.location.z - end_waypoint.transform.location.z)
+    return dx + dy + dz
+
+class AStarNode:
+    def __init__(self, waypoint, g_cost, h_cost, parent=None):
+        self.waypoint = waypoint
+        self.g_cost = g_cost
+        self.h_cost = h_cost
+        self.f_cost = g_cost + h_cost
+        self.parent = parent
+
+def get_legal_neighbors(waypoint):
+    neighbors = []
+    # Forward neighbor
+    forward = waypoint.next(2.0)
+    if forward:
+        neighbors.extend(forward)
+    
+    # Legal left lane change
+    if waypoint.lane_change & carla.LaneChange.Left:
+        left_lane = waypoint.get_left_lane()
+        if left_lane and left_lane.lane_type == carla.LaneType.Driving:
+            neighbors.append(left_lane)
+    
+    # Legal right lane change
+    if waypoint.lane_change & carla.LaneChange.Right:
+        right_lane = waypoint.get_right_lane()
+        if right_lane and right_lane.lane_type == carla.LaneType.Driving:
+            neighbors.append(right_lane)
+    
+    return neighbors
+
+def a_star(world, start_waypoint, end_waypoint, heuristic_func=euclidean_heuristic, max_distance=5000):
+    start_node = AStarNode(start_waypoint, 0, heuristic_func(start_waypoint, end_waypoint))
+    open_set = PriorityQueue()
+    open_set.put((start_node.f_cost, id(start_node), start_node))
+    came_from = {}
+    g_score = {start_waypoint.id: 0}
+    f_score = {start_waypoint.id: start_node.f_cost}
+    
+    while not open_set.empty():
+        current_node = open_set.get()[2]
+        
+        # Early exit if we have reached near the goal
+        if current_node.waypoint.transform.location.distance(end_waypoint.transform.location) < 10.0:
+            path = []
+
+            while current_node:
+                path.append(current_node.waypoint)
+                current_node = came_from.get(current_node.waypoint.id)
+            return list(reversed(path))
+        
+        for next_waypoint in get_legal_neighbors(current_node.waypoint):
+            lane_change_cost = 5 if next_waypoint.lane_id != current_node.waypoint.lane_id else 0
+            tentative_g_score = g_score[current_node.waypoint.id] + euclidean_heuristic(current_node.waypoint, next_waypoint) + lane_change_cost
+            if next_waypoint.id not in g_score or tentative_g_score < g_score[next_waypoint.id]:
+                came_from[next_waypoint.id] = current_node                
+                g_score[next_waypoint.id] = tentative_g_score
+                f_score[next_waypoint.id] = tentative_g_score + heuristic_func(next_waypoint, end_waypoint)
+                new_node = AStarNode(next_waypoint, tentative_g_score, heuristic_func(next_waypoint, end_waypoint), current_node)
+                open_set.put((f_score[next_waypoint.id], id(new_node), new_node))
+                
+    print("A* search failed to find a path")
+    return None
+
+
+params = {
+  'number_of_vehicles': 1,
+  'number_of_walkers': 0,
+  'display_size': 256,  # screen size of bird-eye render
+  'max_past_step': 1,  # the number of past steps to draw
+  'dt': 0.1,  # time interval between two frames
+  'discrete': True,  # whether to use discrete control space
+  'discrete_acc': [-3.0, 0.0, 3.0],  # discrete value of accelerations
+  'discrete_steer': [-0.2, 0.0, 0.2],  # discrete value of steering angles
+  'continuous_accel_range': [-3.0, 3.0],  # continuous acceleration range
+  'continuous_steer_range': [-0.3, 0.3],  # continuous steering angle range
+  'ego_vehicle_filter': 'vehicle.lincoln*',  # filter for defining ego vehicle
+  'port': 2000,  # connection port
+  'town': 'Town03',  # which town to simulate
+  'max_time_episode': 1000,  # maximum timesteps per episode
+  'max_waypt': 12,  # maximum number of waypoints
+  'obs_range': 32,  # observation range (meter)
+  'lidar_bin': 0.125,  # bin size of lidar sensor (meter)
+  'd_behind': 12,  # distance behind the ego vehicle (meter)
+  'out_lane_thres': 2.0,  # threshold for out of lane
+  'desired_speed': 8,  # desired speed (m/s)
+  'max_ego_spawn_times': 200,  # maximum times to spawn ego vehicle
+  'display_route': True,  # whether to render the desired route
+}
+
 class CarlaEnv(gym.Env):
   """An OpenAI gym wrapper for CARLA simulator."""
 
-  def __init__(self, params):
+  def __init__(self, params = params):
     # parameters
     self.display_size = params['display_size']  # rendering screen size
     self.max_past_step = params['max_past_step']
@@ -49,8 +183,6 @@ class CarlaEnv(gym.Env):
     self.max_ego_spawn_times = params['max_ego_spawn_times']
     self.display_route = params['display_route']
 
-
-
     # action and observation spaces
     self.discrete = params['discrete']
     self.discrete_act = [params['discrete_acc'], params['discrete_steer']] # acc, steer
@@ -63,7 +195,7 @@ class CarlaEnv(gym.Env):
       params['continuous_steer_range'][0]]), np.array([params['continuous_accel_range'][1],
       params['continuous_steer_range'][1]]), dtype=np.float32)  # acc, steer
 
-    self.observation_space = spaces.Box(low=0, high=255, shape=(self.obs_size, self.obs_size, 4), dtype=np.uint8)
+    self.observation_space = spaces.Box(low=0, high=255, shape=(786532,), dtype=np.float32)
 
     # Connect to carla server and get world object
     print('connecting to Carla server...')
@@ -86,29 +218,44 @@ class CarlaEnv(gym.Env):
         self.walker_spawn_points.append(spawn_point)
 
     # Create the ego vehicle blueprint
-    self.ego_bp = self._create_vehicle_bluepprint(params['ego_vehicle_filter'], color='242,250,12')
+    self.ego_bp = self._create_vehicle_bluepprint(params['ego_vehicle_filter'], color='49,8,8')
 
     # Collision sensor
     self.collision_hist = [] # The collision history
     self.collision_hist_l = 1 # collision history length
     self.collision_bp = self.world.get_blueprint_library().find('sensor.other.collision')
 
-    self.past_img = []
-
-
+    # Lidar sensor
+    self.lidar_data = None
+    self.lidar_height = 1.8
+    self.lidar_trans = carla.Transform(carla.Location(x=-0.5, z=self.lidar_height))
+    self.lidar_bp = self.world.get_blueprint_library().find('sensor.lidar.ray_cast')
+    self.lidar_bp.set_attribute('channels', '64.0')
+    self.lidar_bp.set_attribute('range', '100.0')
+    self.lidar_bp.set_attribute('upper_fov', '15')
+    self.lidar_bp.set_attribute('lower_fov', '-25')
+    self.lidar_bp.set_attribute('rotation_frequency', str(1.0 / 0.05))
+    self.lidar_bp.set_attribute('points_per_second', '500000')
 
     # Camera sensor
-    self.camera_img = np.zeros((4, self.obs_size, self.obs_size), dtype=np.uint8)
-
+    self.camera_img = np.zeros((4, self.obs_size, self.obs_size, 3), dtype = np.dtype("uint8"))
     self.camera_bp = self.world.get_blueprint_library().find('sensor.camera.rgb')
+    
     # Modify the attributes of the blueprint to set image resolution and field of view.
     self.camera_bp.set_attribute('image_size_x', str(self.obs_size))
     self.camera_bp.set_attribute('image_size_y', str(self.obs_size))
     self.camera_bp.set_attribute('fov', '110')
+    
     # Set the time in seconds between sensor captures
     self.camera_bp.set_attribute('sensor_tick', '0.02')
 
     self.camera_trans = carla.Transform(carla.Location(x=1.5, z=1.5))
+
+    self.camera_trans2 = carla.Transform(carla.Location(x=0.7, y=0.9, z=1), carla.Rotation(pitch=-35.0, yaw=134.0))
+
+    self.camera_trans3 = carla.Transform(carla.Location(x=0.7, y=-0.9, z=1), carla.Rotation(pitch=-35.0, yaw=-134.0))
+
+    self.camera_trans4 = carla.Transform(carla.Location(x=-1.5, z=1.5), carla.Rotation(yaw=180.0))
 
     # Set fixed simulation step for synchronous mode
     self.settings = self.world.get_settings()
@@ -119,13 +266,21 @@ class CarlaEnv(gym.Env):
     self.total_step = 0
 
     # Initialize the renderer
-    self._init_renderer()
+    # self._init_renderer()
+    
+    # Initialize next turn
+    self.next_turn = Turn.STRAIGHT
+    
+    self.prev_g_dist = 0
 
-  def reset(self):
+  def reset(self, seed=None, options={}):
     # Clear sensor objects
     self.collision_sensor = None
+    self.lidar_sensor = None
     self.camera_sensor = None
-
+    self.camera2_sensor = None
+    self.camera3_sensor = None
+    self.camera4_sensor = None
 
     # Delete sensors, vehicles and walkers
     self._clear_all_actors(['sensor.other.collision', 'sensor.lidar.ray_cast', 'sensor.camera.rgb', 'vehicle.*', 'controller.ai.walker', 'walker.*'])
@@ -172,10 +327,27 @@ class CarlaEnv(gym.Env):
     while True:
       if ego_spawn_times > self.max_ego_spawn_times:
         self.reset()
+      
+      carla_map = self.world.get_map()
+      spawn_points = carla_map.get_spawn_points()
 
-      transform = random.choice(self.vehicle_spawn_points)
+      # Choose a random starting location (point A)
+      point_a = random.choice(spawn_points)
 
-      if self._try_spawn_ego_vehicle_at(transform):
+      # Choose a random destination (point B)
+      point_b = random.choice(spawn_points)
+      while point_b.location == point_a.location:
+          point_b = random.choice(spawn_points)
+
+      start_waypoint = carla_map.get_waypoint(point_a.location)
+      end_waypoint = carla_map.get_waypoint(point_b.location)
+      
+      self.route = a_star(self.world, start_waypoint, end_waypoint)
+      
+      # for waypoint in self.route:
+            # self.world.debug.draw_string(waypoint.transform.location, '^', draw_shadow=False, color=carla.Color(r=220, g=0, b=0), life_time=25.0, persistent_lines=True)
+
+      if self._try_spawn_ego_vehicle_at(point_a):
         break
       else:
         ego_spawn_times += 1
@@ -192,28 +364,87 @@ class CarlaEnv(gym.Env):
         self.collision_hist.pop(0)
     self.collision_hist = []
 
+    # Add lidar sensor
+    self.lidar_sensor = self.world.spawn_actor(self.lidar_bp, self.lidar_trans, attach_to=self.ego)
+    self.point_list = o3d.geometry.PointCloud()
+    self.lidar_sensor.listen(lambda data: get_lidar_data(data, self.point_list))
+    def get_lidar_data(point_cloud, point_list):
+      data = np.copy(np.frombuffer(point_cloud.raw_data, dtype=np.dtype('f4')))
+      data = np.reshape(data, (int(data.shape[0] / 4), 4))
+
+      # Isolate the intensity and compute a color for it
+      intensity = data[:, -1]
+      intensity_col = 1.0 - np.log(intensity) / np.log(np.exp(-0.004 * 100))
+      int_color = np.c_[
+          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 0]),
+          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 1]),
+          np.interp(intensity_col, VID_RANGE, VIRIDIS[:, 2])]
+
+      # Isolate the 3D data
+      points = data[:, :-1]
+
+      points[:, :1] = -points[:, :1]
+
+      point_list.points = o3d.utility.Vector3dVector(points)
+      point_list.colors = o3d.utility.Vector3dVector(int_color)
+
+    def run_open3d():
+      # self.vis = o3d.visualization.Visualizer()
+      # self.vis.create_window(
+      #     window_name='Carla Lidar',
+      #     width=540,
+      #     height=540,
+      #     left=480,
+      #     top=270, visible=False)
+      # self.vis.get_render_option().background_color = [0.05, 0.05, 0.05]
+      # self.vis.get_render_option().point_size = 1
+      # self.vis.get_render_option().show_coordinate_frame = True
+
+      self.frame = 0
+      self.dt0 = datetime.now()
+
+
+    thread_open3d = threading.Thread(target=run_open3d)
+    thread_open3d.start()
+    
+    def get_camera_img(data):
+      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
+      array = np.reshape(array, (data.height, data.width, 4))
+      array = array[:, :, :3]
+      array = array[:, :, ::-1]
+      self.camera_img[0] = array
+
+    def get_camera_img2(data):
+      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
+      array = np.reshape(array, (data.height, data.width, 4))
+      array = array[:, :, :3]
+      array = array[:, :, ::-1]
+      self.camera_img[1] = array
+
+    def get_camera_img3(data):
+      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
+      array = np.reshape(array, (data.height, data.width, 4))
+      array = array[:, :, :3]
+      array = array[:, :, ::-1]
+      self.camera_img[2] = array
+
+    def get_camera_img4(data):
+      array = np.frombuffer(data.raw_data, dtype = np.dtype("uint8"))
+      array = np.reshape(array, (data.height, data.width, 4))
+      array = array[:, :, :3]
+      array = array[:, :, ::-1]
+      self.camera_img[3] = array
 
     # Add camera sensors
     self.camera_sensor = self.world.spawn_actor(self.camera_bp, self.camera_trans, attach_to=self.ego)
     self.camera_sensor.listen(lambda data: get_camera_img(data))
-
-    def get_camera_img(data):
-      array = np.frombuffer(data.raw_data, dtype=np.uint8)
-      array = np.reshape(array, (data.height, data.width, 4))
-      array = array[:, :, :3]
-      array = array[:, :, ::-1]
-      # Grayscale
-      array = np.mean(array, axis=2)
-      array = array.astype(np.uint8)
-      self.camera_img[0] = array
-      while len(self.past_img) < 3:
-        self.past_img.append(array)
-      for i in range(3):
-        self.camera_img[i+1] = self.past_img[i]
-      self.past_img.pop()
-      self.past_img.insert(0, array)
-
-
+    self.camera_sensor2 = self.world.spawn_actor(self.camera_bp, self.camera_trans2, attach_to=self.ego)
+    self.camera_sensor2.listen(lambda data: get_camera_img2(data))
+    self.camera_sensor3 = self.world.spawn_actor(self.camera_bp, self.camera_trans3, attach_to=self.ego)
+    self.camera_sensor3.listen(lambda data: get_camera_img3(data))
+    self.camera_sensor4 = self.world.spawn_actor(self.camera_bp, self.camera_trans4, attach_to=self.ego)
+    self.camera_sensor4.listen(lambda data: get_camera_img4(data))
+      
     # Update timesteps
     self.time_step=0
     self.reset_step+=1
@@ -224,21 +455,18 @@ class CarlaEnv(gym.Env):
 
     self.routeplanner = RoutePlanner(self.ego, self.max_waypt)
     self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
-
-    self.last_waypoint = self.waypoints[0]
-    ego_x, ego_y = get_pos(self.ego)
+    self.prev_g_dist = 0
     
-    self.last_distance = (ego_x-self.waypoints[1][0])**2 + (ego_y-self.waypoints[1][1])**2
-    self.last_lane_distance, w = get_lane_dis(self.waypoints, ego_x, ego_y)
-
-    for _,direction in self.waypoints:
-      if direction != RoadOption.LANEFOLLOW:
-        print(direction)
-        break
-
     # Set ego information for render
-    self.birdeye_render.set_hero(self.ego, self.ego.id)
-    return self._get_obs()
+    # self.birdeye_render.set_hero(self.ego, self.ego.id)
+    
+    # state information
+    info = {
+      'waypoints': self.waypoints,
+      'vehicle_front': self.vehicle_front
+    }
+    
+    return self._get_obs(), copy.deepcopy(info)
 
   def step(self, action):
     # Calculate acceleration and steering
@@ -261,11 +489,28 @@ class CarlaEnv(gym.Env):
     act = carla.VehicleControl(throttle=float(throttle), steer=float(-steer), brake=float(brake))
     self.ego.apply_control(act)
 
-    carPos = self.ego.get_transform()
-    self.world.get_spectator().set_transform(carla.Transform(carla.Location(carPos.location.x, carPos.location.y, 50), carla.Rotation(300,carPos.rotation.yaw,0)))
+    # def update_open3d():
+    #   if self.frame == 2:
+    #       self.vis.add_geometry(self.point_list)
+    #   self.vis.update_geometry(self.point_list)
 
+    #   self.vis.poll_events()
+    #   self.vis.update_renderer()
+    #   self.vis.capture_screen_image(filename="lidar_temp_img.png")
+
+
+    # thread_update3d = threading.Thread(target=update_open3d)
+    # thread_update3d.start()
+         # This can fix Open3D jittering issues:
+    time.sleep(0.005)
 
     self.world.tick()
+
+    process_time = datetime.now() - self.dt0
+    sys.stdout.write('\r' + 'FPS: ' + str(1.0 / process_time.total_seconds()))
+    sys.stdout.flush()
+    self.dt0 = datetime.now()
+    self.frame += 1
 
     # Append actors polygon list
     vehicle_poly_dict = self._get_actor_polygons('vehicle.*')
@@ -290,7 +535,7 @@ class CarlaEnv(gym.Env):
     self.time_step += 1
     self.total_step += 1
 
-    return (self._get_obs(), self._get_reward(), self._terminal(), copy.deepcopy(info))
+    return (self._get_obs(), self._get_reward(), self._terminal(), self._terminal(), copy.deepcopy(info))
 
   def seed(self, seed=None):
     self.np_random, seed = seeding.np_random(seed)
@@ -319,22 +564,22 @@ class CarlaEnv(gym.Env):
       bp.set_attribute('color', color)
     return bp
 
-  def _init_renderer(self):
-    """Initialize the birdeye view renderer.
-    """
-    pygame.init()
-    self.display = pygame.display.set_mode(
-    (self.display_size * 5, self.display_size),
-    pygame.HWSURFACE | pygame.DOUBLEBUF)
+  # def _init_renderer(self):
+  #   """Initialize the birdeye view renderer.
+  #   """
+  #   pygame.init()
+  #   self.display = pygame.display.set_mode(
+  #   (self.display_size * 6, self.display_size),
+  #   pygame.HWSURFACE | pygame.DOUBLEBUF)
 
-    pixels_per_meter = self.display_size / self.obs_range
-    pixels_ahead_vehicle = (self.obs_range/2 - self.d_behind) * pixels_per_meter
-    birdeye_params = {
-      'screen_size': [self.display_size, self.display_size],
-      'pixels_per_meter': pixels_per_meter,
-      'pixels_ahead_vehicle': pixels_ahead_vehicle
-    }
-    self.birdeye_render = BirdeyeRender(self.world, birdeye_params)
+  #   pixels_per_meter = self.display_size / self.obs_range
+  #   pixels_ahead_vehicle = (self.obs_range/2 - self.d_behind) * pixels_per_meter
+  #   birdeye_params = {
+  #     'screen_size': [self.display_size, self.display_size],
+  #     'pixels_per_meter': pixels_per_meter,
+  #     'pixels_ahead_vehicle': pixels_ahead_vehicle
+  #   }
+  #   self.birdeye_render = BirdeyeRender(self.world, birdeye_params)
 
   def _set_synchronous_mode(self, synchronous = True):
     """Set whether to use the synchronous mode.
@@ -447,158 +692,143 @@ class CarlaEnv(gym.Env):
   def _get_obs(self):
     """Get the observations."""
     ## Birdeye rendering
-    self.birdeye_render.vehicle_polygons = self.vehicle_polygons
-    self.birdeye_render.walker_polygons = self.walker_polygons
-    self.birdeye_render.waypoints = self.waypoints
+    # self.birdeye_render.vehicle_polygons = self.vehicle_polygons
+    # self.birdeye_render.walker_polygons = self.walker_polygons
+    # self.birdeye_render.waypoints = self.waypoints
 
     # birdeye view with roadmap and actors
-    birdeye_render_types = ['roadmap', 'actors']
-    if self.display_route:
-      birdeye_render_types.append('waypoints')
-    self.birdeye_render.render(self.display, birdeye_render_types)
-    birdeye = pygame.surfarray.array3d(self.display)
-    birdeye = birdeye[0:self.display_size, :, :]
-    birdeye = display_to_rgb(birdeye, self.obs_size)
-
+    # birdeye_render_types = ['roadmap', 'actors']
+    # if self.display_route:
+      # birdeye_render_types.append('waypoints')
+    # self.birdeye_render.render(self.display, birdeye_render_types)
+    # birdeye = pygame.surfarray.array3d(self.display)
+    # birdeye = birdeye[0:self.display_size, :, :]
+    # birdeye = display_to_rgb(birdeye, self.obs_size)
 
     # Display birdeye image
-    birdeye_surface = rgb_to_display_surface(birdeye, self.display_size)
-    self.display.blit(birdeye_surface, (0, 0))
+    # birdeye_surface = rgb_to_display_surface(birdeye, self.display_size)
+    # self.display.blit(birdeye_surface, (0, 0))
 
-    # Direction
-    intersect_option = 0
-    for location,direction in self.waypoints:
-      self.world.debug.draw_point(carla.Location(location[0],location[1],1),life_time=1)
-      if intersect_option == 0 and direction != RoadOption.LANEFOLLOW:
-        intersect_option = direction
-
-    img = None
-    if intersect_option == 0:
-      img = Image.open("lane.jpg")
-    elif intersect_option == 1:
-      img = Image.open("left.jpg")
-    elif intersect_option == 2:
-      img = Image.open("right.png")
-    else:
-      img = Image.open("straight.png")
-    self.sign_img = np.array(img)
-    self.sign_img = np.mean(self.sign_img, axis=2)
-    self.sign_img = self.sign_img.astype(np.uint8)
-    sign_arr = resize(self.sign_img, (self.obs_size//8, self.obs_size//8), preserve_range=True)
-    sign_arr = sign_arr.astype(np.uint8)
-    self.sign_img = Image.fromarray(sign_arr)
+    img = Image.open("lidar_temp_img.png")
+    self.lidar_img = np.array(img)
+    lidar_arr = np.zeros((1, self.obs_size, self.obs_size, 3))
+    lidar_arr = lidar_arr.astype(np.float32)
+    lidar_arr[0] = resize(self.lidar_img, (self.obs_size, self.obs_size, 3)) * 255
+    # lidar_surface = rgb_to_display_surface(lidar_arr[0], self.display_size)
+    # self.display.blit(lidar_surface, (self.display_size * 1, 0))
 
     ## Display camera image
-    camera = resize(self.camera_img, (4, self.obs_size, self.obs_size), preserve_range=True)
-    camera = camera.astype(np.uint8)
+    camera = resize(self.camera_img, (4, self.obs_size, self.obs_size, 3)) * 255
+    camera = camera.astype(np.float32)
 
-    temp = Image.fromarray(camera[0])
-    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
-    camera[0] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+    # camera_surface = rgb_to_display_surface(camera[0], self.display_size)
+    # self.display.blit(camera_surface, (self.display_size * 3, 0))
 
-    temp = Image.fromarray(camera[1])
-    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
-    camera[1] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+    # camera_surface2 = rgb_to_display_surface(camera[1], self.display_size)
+    # self.display.blit(camera_surface2, (self.display_size * 2, 0))
 
-    temp = Image.fromarray(camera[2])
-    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
-    camera[2] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
+    # camera_surface3 = rgb_to_display_surface(camera[2], self.display_size)
+    # self.display.blit(camera_surface3, (self.display_size * 4, 0))
 
-    temp = Image.fromarray(camera[3])
-    temp.paste(self.sign_img, (0,0), mask=self.sign_img)
-    camera[3] = resize(np.array(temp), (self.obs_size, self.obs_size), preserve_range=True)
-
-    camera_surface = grayscale_to_display_surface(camera[0], self.display_size)
-    self.display.blit(camera_surface, (self.display_size * 1, 0))
-
-    camera_surface = grayscale_to_display_surface(camera[1], self.display_size)
-    self.display.blit(camera_surface, (self.display_size * 2, 0))
-
-    camera_surface = grayscale_to_display_surface(camera[2], self.display_size)
-    self.display.blit(camera_surface, (self.display_size * 3, 0))
-
-    camera_surface = grayscale_to_display_surface(camera[3], self.display_size)
-    self.display.blit(camera_surface, (self.display_size * 4, 0))
-
-
-    #direction_arr = np.zeros((1, self.obs_size, self.obs_size), dtype=np.uint8)
-    #direction_arr[0][0 if intersect_option % 2 == 0 else -1][0 if intersect_option // 2 == 0 else -1] = 255
-    #direction_arr = direction_arr.astype(np.uint8)
-
-
+    # camera_surface4 = rgb_to_display_surface(camera[3], self.display_size)
+    # self.display.blit(camera_surface4, (self.display_size * 5, 0))
 
     # Display on pygame
-    pygame.display.flip()
-
+    # pygame.display.flip()
 
     obs = {
       'camera':camera,
-      'birdeye':birdeye.astype(np.uint8),
+      # 'lidar':lidar_arr,
+      # 'birdeye':birdeye.astype(np.uint8),
     }
+    
+    next_turn = self.get_turn()
+    
+    turn = np.array([next_turn.value])
+    turn = np.pad(turn, (0, 99), 'constant', constant_values=(0, turn[0]))
+    
+    cameras = obs['camera'].flatten()
 
-    return np.transpose(obs['camera'], (1,2,0))
+    obs = np.concatenate((cameras, turn))
+    return np.float32(obs)
+  
+  def get_turn(self):
+    route = self.route
+    
+    n = 20
+    
+    i, waypoint, _ = get_closest_waypoint(route, self.ego.bounding_box.location)
+
+    nth = None
+
+    if i + n >= len(route):
+        nth = route[-1]
+        
+    else:
+        nth = route[i + n]
+        
+    self.world.debug.draw_string(nth.transform.location, '^', draw_shadow=False, color=carla.Color(r=0, g=0, b=255), life_time=25.0, persistent_lines=True)
+    
+    n_r = (nth.transform.rotation.yaw)
+    w_r = (waypoint.transform.rotation.yaw)
+    ang = round(n_r - w_r)
+    
+    if ang == 0 or ang == 360 or ang == -360:
+        self.next_turn = Turn.STRAIGHT
+    elif ang > 0:
+        self.next_turn = Turn.RIGHT
+    elif ang < 0:
+        self.next_turn = Turn.LEFT
+    
+    return self.next_turn
 
   def _get_reward(self):
     """Calculate the step reward."""
     # reward for speed tracking
     v = self.ego.get_velocity()
     speed = np.sqrt(v.x**2 + v.y**2)
-    #r_speed = -300 * (abs(speed - self.desired_speed)**2)
-    #r_speed = 0
+    r_speed = -abs(speed - self.desired_speed)
 
     # reward for collision
     r_collision = 0
     if len(self.collision_hist) > 0:
-      r_collision = -100000
+      r_collision = -1
 
     # reward for steering:
-    #r_steer = -self.ego.get_control().steer**2
+    r_steer = -self.ego.get_control().steer**2
+    
+    # reward for distance from A* path
+    _ , _ , dist = get_closest_waypoint(self.route, self.ego.bounding_box.location)
+    r_l_dist = -1 *  dist
+    
+    # reward for distance from goal
+    prev_g_dist = self.prev_g_dist
+    goal = self.route[-1].transform.location
+    current = self.ego.bounding_box.location
+    curr_g_dist = goal.distance(current)
+    r_g_dist = abs(prev_g_dist) - abs(curr_g_dist)
+    self.prev_g_dist = curr_g_dist
 
     # reward for out of lane
     ego_x, ego_y = get_pos(self.ego)
     dis, w = get_lane_dis(self.waypoints, ego_x, ego_y)
-    #r_lane_dis = -100 * (abs(dis)**2)
-    if abs(dis) < 0.5:
-      r_lane_dis = 10000
-    elif abs(dis) < abs(self.last_lane_distance):
-      r_lane_dis = 5000
-    else:
-      r_lane_dis = -5000
-    self.last_lane_distance = dis
-
     r_out = 0
     if abs(dis) > self.out_lane_thres:
-      r_out = -100000
+      r_out = -1
 
     # longitudinal speed
-    #lspeed = np.array([v.x, v.y])
-    #lspeed_lon = np.dot(lspeed, w)
+    lspeed = np.array([v.x, v.y])
+    lspeed_lon = np.dot(lspeed, w)
 
+    # cost for too fast
+    r_fast = 0
+    if lspeed_lon > self.desired_speed:
+      r_fast = -1
 
-    # cost for stopped
-    r_speed = 0
-    if speed < 3:
-      r_speed = -6000
+    # cost for lateral acceleration
+    r_lat = - abs(self.ego.get_control().steer) * lspeed_lon**2
 
-    r_waypoint = 0
-    if (self.waypoints[0] != self.last_waypoint):
-      r_waypoint = 10000
-      self.last_waypoint = self.waypoints[0]
-      self.last_distance = (ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2
-    else:
-      if ((ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2) < self.last_distance:
-        self.last_distance = (ego_x-self.waypoints[1][0][0])**2 + (ego_y-self.waypoints[1][0][1])**2
-        r_waypoint = 5000
-      else:
-        r_waypoint = -1000
-
-    print("Collision: " + str(r_collision) + "\n")
-    print("Speed: " + str(r_speed) + "\n")
-    print("Out: " + str(r_out) + "\n")
-    print("Waypoint: " + str(r_waypoint) + "\n")
-    print("Lane Dis: " + str(r_lane_dis) + "-----True Value: " + str(dis))
-    print("\n-----------------------------------------------")
-    r = r_collision + r_speed + r_out - 200 + r_waypoint + r_lane_dis
+    r = (200*r_collision) + (5*r_speed) + (2*r_fast) + (2*r_out + r_steer*5) + (0.2*r_lat - 0.1 ) + (r_l_dist * 20) + (r_g_dist * 10)
 
     return r
 
@@ -615,10 +845,10 @@ class CarlaEnv(gym.Env):
     if self.time_step>self.max_time_episode:
       return True
 
-
-    # If out of lane
-    dis, _ = get_lane_dis(self.waypoints, ego_x, ego_y)
-    if abs(dis) > self.out_lane_thres:
+    destination = self.route[-1].transform.location
+    dest_dist = self.ego.bounding_box.location.distance(destination)
+    
+    if dest_dist < 10:
       return True
 
     return False

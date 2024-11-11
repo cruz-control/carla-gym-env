@@ -12,7 +12,7 @@
 import math
 import numpy as np
 import carla
-import pygame
+# import pygame
 from matplotlib.path import Path
 import skimage
 
@@ -235,17 +235,17 @@ def display_to_rgb(display, obs_size):
   rgb = rgb * 255
   return rgb
 
-def rgb_to_display_surface(rgb, display_size):
-  """
-  Generate pygame surface given an rgb image uint8 matrix
-  :param rgb: rgb image uint8 matrix
-  :param display_size: display size
-  :return: pygame surface
-  """
-  surface = pygame.Surface((display_size, display_size)).convert()
-  display = skimage.transform.resize(rgb, (display_size, display_size))
-  display = np.flip(display, axis=1)
-  display = np.rot90(display, 1)
-  pygame.surfarray.blit_array(surface, display)
-  return surface
+# def rgb_to_display_surface(rgb, display_size):
+#   """
+#   Generate pygame surface given an rgb image uint8 matrix
+#   :param rgb: rgb image uint8 matrix
+#   :param display_size: display size
+#   :return: pygame surface
+#   """
+#   surface = pygame.Surface((display_size, display_size)).convert()
+#   display = skimage.transform.resize(rgb, (display_size, display_size))
+#   display = np.flip(display, axis=1)
+#   display = np.rot90(display, 1)
+#   pygame.surfarray.blit_array(surface, display)
+#   return surface
 

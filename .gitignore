@@ -1,1 +1,2 @@
-/tensorboard
+/tensorboard*
+/__pycache__
