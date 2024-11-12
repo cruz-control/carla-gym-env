@@ -7,6 +7,7 @@ import gymnasium as gym
 import gym_carla
 import carla
 from stable_baselines3 import SAC
+from stable_baselines3 import DQN
 
 def main():
   # parameters for the gym_carla environment
@@ -19,8 +20,8 @@ def main():
     'discrete': False,  # whether to use discrete control space
     'discrete_acc': [-3.0, 0.0, 3.0],  # discrete value of accelerations
     'discrete_steer': [-0.2, 0.0, 0.2],  # discrete value of steering angles
-    'continuous_accel_range': [-3.0, 3.0],  # continuous acceleration range
-    'continuous_steer_range': [-0.3, 0.3],  # continuous steering angle range
+    'continuous_accel_range': [-1, 1],  # continuous acceleration range
+    'continuous_steer_range': [-1, 1],  # continuous steering angle range
     'ego_vehicle_filter': 'vehicle.lincoln*',  # filter for defining ego vehicle
     'port': 2000,  # connection port
     'town': 'Town03',  # which town to simulate
@@ -34,20 +35,18 @@ def main():
     'max_ego_spawn_times': 200,  # maximum times to spawn ego vehicle
     'display_route': False,  # whether to render the desired route
   }
+  
+  save_name = "DQN_dist"
 
   # Set gym-carla environment
   env = gym.make('carla-v0', params=params)
 
-  model = SAC("MlpPolicy", env, device="cuda", buffer_size=20000, verbose=1, tensorboard_log="./tensorboard_DQN/")  
-  model = SAC.load("SAC_dist")
-
-  obs, info = env.reset()
+  model = SAC("MlpPolicy", env, device="cuda", buffer_size=500, verbose=1, tensorboard_log="./tensorboard_DQN/")
   
-  while True:
-    action, _states = model.predict(obs)
-    obs, reward, terminated, truncated, info = env.step(action)
-    if terminated or truncated:
-        obs, info = env.reset()
+  model.learn(total_timesteps=1000)
+  model.save(save_name)
+  
+  print("Done Training")
 
 if __name__ == '__main__':
   main()

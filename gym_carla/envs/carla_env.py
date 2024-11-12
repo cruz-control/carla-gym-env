@@ -453,17 +453,25 @@ class CarlaEnv(gym.Env):
     self.settings.synchronous_mode = True
     self.world.apply_settings(self.settings)
 
-    self.routeplanner = RoutePlanner(self.ego, self.max_waypt)
-    self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
-    self.prev_g_dist = 0
+    # self.routeplanner = RoutePlanner(self.ego, self.max_waypt)
+    # self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
+    
+    print(self.ego.get_location())
+    
+    _ , waypoint , dist = get_closest_waypoint(self.route, self.ego.get_location())
+    self.prev_waypoint = waypoint
+    self.prev_w_dist = dist
+    
+    goal = self.route[-1].transform.location
+    self.prev_g_dist = goal.distance(self.ego.get_location())
     
     # Set ego information for render
     # self.birdeye_render.set_hero(self.ego, self.ego.id)
     
     # state information
     info = {
-      'waypoints': self.waypoints,
-      'vehicle_front': self.vehicle_front
+      #'waypoints': self.waypoints,
+      #'vehicle_front': self.vehicle_front
     }
     
     return self._get_obs(), copy.deepcopy(info)
@@ -502,12 +510,16 @@ class CarlaEnv(gym.Env):
     # thread_update3d = threading.Thread(target=update_open3d)
     # thread_update3d.start()
          # This can fix Open3D jittering issues:
-    time.sleep(0.005)
+    # time.sleep(0.005)
 
     self.world.tick()
+    
+    _ , _ , dist = get_closest_waypoint(self.route, self.ego.get_location())
+    
+    reward = self._get_reward()
 
     process_time = datetime.now() - self.dt0
-    sys.stdout.write('\r' + 'FPS: ' + str(1.0 / process_time.total_seconds()))
+    sys.stdout.write('\r' + 'FPS: ' + str(round(1.0 / process_time.total_seconds())) + " Dist: " + str(round(dist)) + " Reward: " + str(round(reward)) + " Throttle: " + str(round(throttle, 2)) + " Braking: " + str(round(brake, 2)) + " Steer: " + str(round(steer, 2)) + " 0: " + str(action[0]))
     sys.stdout.flush()
     self.dt0 = datetime.now()
     self.frame += 1
@@ -523,19 +535,19 @@ class CarlaEnv(gym.Env):
       self.walker_polygons.pop(0)
 
     # route planner
-    self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
+    #self.waypoints, _, self.vehicle_front = self.routeplanner.run_step()
 
     # state information
     info = {
-      'waypoints': self.waypoints,
-      'vehicle_front': self.vehicle_front
+      #'waypoints': self.waypoints,
+      #'vehicle_front': self.vehicle_front
     }
 
     # Update timesteps
     self.time_step += 1
     self.total_step += 1
-
-    return (self._get_obs(), self._get_reward(), self._terminal(), self._terminal(), copy.deepcopy(info))
+    
+    return (self._get_obs(), reward, self._terminal(), self._terminal(), copy.deepcopy(info))
 
   def seed(self, seed=None):
     self.np_random, seed = seeding.np_random(seed)
@@ -744,12 +756,18 @@ class CarlaEnv(gym.Env):
     
     next_turn = self.get_turn()
     
-    turn = np.array([next_turn.value])
-    turn = np.pad(turn, (0, 99), 'constant', constant_values=(0, turn[0]))
+    # Distance to closest waypoint
+    _ , _ , dist = get_closest_waypoint(self.route, self.ego.get_location())
+    dist_to_waypoint =  np.array([dist])
+    dist_to_waypoint = np.pad(dist_to_waypoint, (0, 49), 'constant', constant_values=(0, dist_to_waypoint[0]))
+    
+    # Turn to take
+    turn = np.array([next_turn.value]) 
+    turn = np.pad(turn, (0, 49), 'constant', constant_values=(0, turn[0]))
     
     cameras = obs['camera'].flatten()
 
-    obs = np.concatenate((cameras, turn))
+    obs = np.concatenate((cameras, turn, dist_to_waypoint))
     return np.float32(obs)
   
   def get_turn(self):
@@ -757,7 +775,7 @@ class CarlaEnv(gym.Env):
     
     n = 20
     
-    i, waypoint, _ = get_closest_waypoint(route, self.ego.bounding_box.location)
+    i, waypoint, _ = get_closest_waypoint(route, self.ego.get_location())
 
     nth = None
 
@@ -785,51 +803,61 @@ class CarlaEnv(gym.Env):
   def _get_reward(self):
     """Calculate the step reward."""
     # reward for speed tracking
-    v = self.ego.get_velocity()
-    speed = np.sqrt(v.x**2 + v.y**2)
-    r_speed = -abs(speed - self.desired_speed)
+    # v = self.ego.get_velocity()
+    # speed = np.sqrt(v.x**2 + v.y**2)
+    # r_speed = -abs(speed - self.desired_speed)
 
     # reward for collision
-    r_collision = 0
+    r_collision = -1
     if len(self.collision_hist) > 0:
-      r_collision = -1
+      r_collision = -3
 
     # reward for steering:
-    r_steer = -self.ego.get_control().steer**2
+    # r_steer = -self.ego.get_control().steer**2
     
     # reward for distance from A* path
-    _ , _ , dist = get_closest_waypoint(self.route, self.ego.bounding_box.location)
-    r_l_dist = -1 *  dist
+    _ , current_waypoint , curr_w_dist = get_closest_waypoint(self.route, self.ego.get_location())
+    prev_w_dist = self.prev_w_dist
+    self.prev_w_dist = curr_w_dist
+    
+    r_w_dist = 1
+    
+    if self.prev_waypoint.id == current_waypoint.id:
+      r_w_dist = abs(prev_w_dist) - abs(curr_w_dist)
+    else:
+      self.prev_waypoint = current_waypoint
+      self.prev_w_dist = curr_w_dist
     
     # reward for distance from goal
     prev_g_dist = self.prev_g_dist
     goal = self.route[-1].transform.location
-    current = self.ego.bounding_box.location
+    current = self.ego.get_location()
     curr_g_dist = goal.distance(current)
-    r_g_dist = abs(prev_g_dist) - abs(curr_g_dist)
     self.prev_g_dist = curr_g_dist
+    r_g_dist = abs(prev_g_dist) - abs(curr_g_dist)
 
     # reward for out of lane
-    ego_x, ego_y = get_pos(self.ego)
-    dis, w = get_lane_dis(self.waypoints, ego_x, ego_y)
-    r_out = 0
-    if abs(dis) > self.out_lane_thres:
-      r_out = -1
+    # ego_x, ego_y = get_pos(self.ego)
+    # dis, w = get_lane_dis(self.waypoints, ego_x, ego_y)
+    # r_out = 0
+    # if abs(dis) > self.out_lane_thres:
+    #   r_out = -1
 
     # longitudinal speed
-    lspeed = np.array([v.x, v.y])
-    lspeed_lon = np.dot(lspeed, w)
+    # lspeed = np.array([v.x, v.y])
+    # lspeed_lon = np.dot(lspeed, w)
 
     # cost for too fast
-    r_fast = 0
-    if lspeed_lon > self.desired_speed:
-      r_fast = -1
+    # r_fast = 0
+    # if lspeed_lon > self.desired_speed:
+    #   r_fast = -1
 
     # cost for lateral acceleration
-    r_lat = - abs(self.ego.get_control().steer) * lspeed_lon**2
+    # r_lat = - abs(self.ego.get_control().steer) * lspeed_lon**2
 
-    r = (200*r_collision) + (5*r_speed) + (2*r_fast) + (2*r_out + r_steer*5) + (0.2*r_lat - 0.1 ) + (r_l_dist * 20) + (r_g_dist * 10)
-
+    r = (r_collision) + (r_w_dist * 20) + (r_g_dist * 10)
+    r = r * 10
+    
     return r
 
   def _terminal(self):
@@ -846,7 +874,7 @@ class CarlaEnv(gym.Env):
       return True
 
     destination = self.route[-1].transform.location
-    dest_dist = self.ego.bounding_box.location.distance(destination)
+    dest_dist = self.ego.get_location().distance(destination)
     
     if dest_dist < 10:
       return True
