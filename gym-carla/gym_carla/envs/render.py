@@ -503,7 +503,7 @@ class BirdeyeRender(object):
       # blue
       color = pygame.Color(0,0,255)
     corners = []
-    for p in waypoints:
+    for p,_ in waypoints:
       corners.append(carla.Location(x=p[0],y=p[1]))
     corners = [world_to_pixel(p) for p in corners]
     pygame.draw.lines(surface, color, False, corners, 20)
