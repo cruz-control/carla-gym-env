@@ -9,7 +9,7 @@
 # This work is licensed under the terms of the MIT license.
 # For a copy, see <https://opensource.org/licenses/MIT>.
 
-from enum import Enum
+from enum import IntEnum
 from collections import deque
 import random
 import numpy as np
@@ -17,7 +17,7 @@ import carla
 
 from gym_carla.envs.misc import distance_vehicle, is_within_distance_ahead, compute_magnitude_angle
 
-class RoadOption(Enum):
+class RoadOption(IntEnum):
   """
   RoadOption represents the possible topological configurations when moving from a segment of lane to other.
   """
@@ -74,9 +74,8 @@ class RoutePlanner():
         road_options_list = retrieve_options(
           next_waypoints, last_waypoint)
 
-        road_option = road_options_list[1]
-        # road_option = random.choice(road_options_list)
-        
+        road_option = random.choice(road_options_list)
+
         next_waypoint = next_waypoints[road_options_list.index(
           road_option)]
 
@@ -111,8 +110,8 @@ class RoutePlanner():
 
     waypoints=[]
 
-    for i, (waypoint, _) in enumerate(self._waypoint_buffer):
-      waypoints.append([waypoint.transform.location.x, waypoint.transform.location.y, waypoint.transform.rotation.yaw])
+    for i, (waypoint, direction) in enumerate(self._waypoint_buffer):
+      waypoints.append(([waypoint.transform.location.x, waypoint.transform.location.y, waypoint.transform.rotation.yaw], direction))
 
     # current vehicle waypoint
     self._current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
@@ -273,10 +272,10 @@ def compute_connection(current_waypoint, next_waypoint):
   c = current_waypoint.transform.rotation.yaw
   c = c % 360.0
 
-  diff_angle = (n - c) % 180.0
-  if diff_angle < 1.0:
+  diff_angle = (n-c+360) % 360
+  if diff_angle < 3 or diff_angle > 357:
     return RoadOption.STRAIGHT
-  elif diff_angle > 90.0:
+  elif diff_angle > 180.0:
     return RoadOption.LEFT
   else:
     return RoadOption.RIGHT

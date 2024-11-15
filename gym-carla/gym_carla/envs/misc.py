@@ -131,15 +131,15 @@ def get_lane_dis(waypoints, x, y):
   :return: a tuple of the distance and the closest waypoint orientation
   """
   dis_min = 1000
-  waypt = waypoints[0]
-  for pt in waypoints:
+  waypt,direction = waypoints[0]
+  for pt,_ in waypoints:
     d = np.sqrt((x-pt[0])**2 + (y-pt[1])**2)
     if d < dis_min:
       dis_min = d
       waypt=pt
   vec = np.array([x - waypt[0], y - waypt[1]])
   lv = np.linalg.norm(np.array(vec))
-  w = np.array([np.cos(waypt[2]/180*np.pi), np.sin(waypt[2]/180*np.pi)])
+  w = np.array([np.cos(np.radians(waypt[2])), np.sin(np.radians(waypt[2]))])
   cross = np.cross(w, vec/lv)
   dis = - lv * cross
   return dis, w
@@ -243,9 +243,13 @@ def rgb_to_display_surface(rgb, display_size):
   :return: pygame surface
   """
   surface = pygame.Surface((display_size, display_size)).convert()
-  display = skimage.transform.resize(rgb, (display_size, display_size))
+  display = skimage.transform.resize(rgb, (display_size, display_size), preserve_range=True)
   display = np.flip(display, axis=1)
   display = np.rot90(display, 1)
   pygame.surfarray.blit_array(surface, display)
   return surface
+
+def grayscale_to_display_surface(gray, display_size):
+
+  return rgb_to_display_surface(np.stack((gray, gray, gray), axis=2), display_size)
 
