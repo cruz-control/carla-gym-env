@@ -22,7 +22,7 @@ def main():
     'continuous_accel_range': [-3.0, 3.0],  # continuous acceleration range
     'continuous_steer_range': [-0.3, 0.3],  # continuous steering angle range
     'ego_vehicle_filter': 'vehicle.lincoln*',  # filter for defining ego vehicle
-    'port': 2000,  # connection port
+    'port': 4000,  # connection port
     'town': 'Town03',  # which town to simulate
     'max_time_episode': 1000,  # maximum timesteps per episode
     'max_waypt': 12,  # maximum number of waypoints
@@ -38,7 +38,7 @@ def main():
   # Set gym-carla environment
   env = gym.make('carla-v0', params=params)
 
-  model = SAC("MlpPolicy", env, device="cuda", buffer_size=20000, verbose=1, tensorboard_log="./tensorboard_DQN/")  
+  model = SAC("MlpPolicy", env, device="cuda:1", buffer_size=20000, verbose=1, tensorboard_log="./tensorboard_DQN/")  
   model = SAC.load("SAC_dist")
 
   obs, info = env.reset()

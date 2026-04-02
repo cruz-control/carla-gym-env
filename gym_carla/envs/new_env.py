@@ -155,14 +155,26 @@ def a_star(
     return None
 
 
+params = {
+    'number_of_vehicles': 1,
+    'number_of_walkers': 0,
+    'max_time_episode': 100,
+    'port': 4000,
+    'connection_timeout': 100,
+    'town': 'Town03',
+    'weather': carla.WeatherParameters.ClearNoon,
+    'ego_vehicle_filter': "vehicle.lincoln*",
+    'ego_vehicle_color': '49,8,8'
+}
+
 class NewCarlaEnv(gym.Env):
     """An OpenAI gym wrapper for CARLA simulator."""
 
-    def __init__(self):
+    def __init__(self, params=params):
         # parameters
-        self.number_of_vehicles = 1
-        self.number_of_walkers = 0
-        self.max_time_episode = 100
+        self.number_of_vehicles = params["number_of_vehicles"]
+        self.number_of_walkers  = params["number_of_walkers"]
+        self.max_time_episode   = params["max_time_episode"]
 
         self.action_space = spaces.Box(
             low=-1, high=1, shape=(3,), dtype=np.float32
@@ -174,14 +186,16 @@ class NewCarlaEnv(gym.Env):
 
         # Connect to carla server and get world object
         print("connecting to Carla server...")
-        self.client = carla.Client("localhost", 2000)
-        self.client.set_timeout(4000.0)
+        self.client = carla.Client("localhost", params["port"])
+        self.client.set_timeout(params["connection_timeout"])
+        #self.world = self.client.load_world(params['town'])
         self.world = self.client.get_world()
+
 
         print("Carla server connected!")
 
         # Set weather
-        self.world.set_weather(carla.WeatherParameters.ClearNoon)
+        self.world.set_weather(params["weather"])
 
         # Get spawn points
         self.vehicle_spawn_points = list(self.world.get_map().get_spawn_points())
@@ -196,7 +210,7 @@ class NewCarlaEnv(gym.Env):
 
         # Create the ego vehicle blueprint
         self.ego_bp = self._create_vehicle_bluepprint(
-            "vehicle.lincoln*", color="49,8,8"
+            params["ego_vehicle_filter"], params["ego_vehicle_color"]
         )
 
         # Collision sensor
@@ -250,7 +264,7 @@ class NewCarlaEnv(gym.Env):
         self.things = []
 
     def reset(self, seed=None, options={}):
-        print("HERE")
+        print("Reset function running")
         # Clear sensor objects
         self.collision_sensor = None
         self.lidar_sensor = None
@@ -258,10 +272,12 @@ class NewCarlaEnv(gym.Env):
         self.camera2_sensor = None
         self.camera3_sensor = None
         self.camera4_sensor = None
+        print("___ sensors cleared")
 
         # Delete sensors, vehicles and walkers
         self._clear_all_actors()
-
+        print("___ actors cleared")
+        
         # Spawn surrounding vehicles
         random.shuffle(self.vehicle_spawn_points)
         count = self.number_of_vehicles
@@ -271,6 +287,9 @@ class NewCarlaEnv(gym.Env):
           if v != False:
             self.things.append(v)
             count -= 1
+
+        print("___ vehicles spawned")
+        
 
         # Spawn pedestrians
         random.shuffle(self.walker_spawn_points)
@@ -282,10 +301,18 @@ class NewCarlaEnv(gym.Env):
             self.things.append(v)
             count -= 1
         
+        print("___ walkers spawned")
+        
         # Spawn Ego
         while True:
           carla_map = self.world.get_map()
           spawn_points = carla_map.get_spawn_points()
+
+          if(carla_map == None):
+            print("ERROR, map could not be retrieved")
+
+          if(len(spawn_points) == 0):
+            print("ERROR, no spawn points found") 
 
           # Choose a random starting location (point A)
           point_a = random.choice(spawn_points)
@@ -295,19 +322,26 @@ class NewCarlaEnv(gym.Env):
           while point_b.location == point_a.location:
               point_b = random.choice(spawn_points)
 
+          print("______ point b chosen")
           start_waypoint = carla_map.get_waypoint(point_a.location)
           end_waypoint = carla_map.get_waypoint(point_b.location)
 
+          print("______ waypoints made")
           self.route = a_star(self.world, start_waypoint, end_waypoint)
-          v = self.world.try_spawn_actor(self.ego_bp, start_waypoint.transform)
+          print("______route made")
+          
+          point_a.location.z += 10
+          v = self.world.spawn_actor(self.ego_bp, point_a)
 
           if v is not None:
             self.ego = v
             self.things.append(v)
             break
+        print("___ ego spawned")
 
         # Add collision sensor
         self.collision_hist = []
+
 
         def get_collision_hist(event):
             impulse = event.normal_impulse
@@ -335,7 +369,7 @@ class NewCarlaEnv(gym.Env):
         )
         self.things.append(self.lidar_sensor)
         self.lidar_sensor.listen(lambda data: get_lidar_data(data))
-
+        print("___ lidar spawned")
         # Add Cameras
         def get_camera_img(data):
             array = np.frombuffer(data.raw_data, dtype=np.dtype("uint8"))
@@ -389,7 +423,7 @@ class NewCarlaEnv(gym.Env):
         )
         self.things.append(self.camera_sensor4)
         self.camera_sensor4.listen(lambda data: get_camera_img4(data))
-
+        print("___ cameras spawned")
         # Set waypoint calc for reward
         _, waypoint, dist = get_closest_waypoint(self.route, self.ego.get_location())
         self.prev_waypoint = waypoint
@@ -400,6 +434,7 @@ class NewCarlaEnv(gym.Env):
         
         self.time_step = 0
 
+        print("___ reset complete")
         return self._get_obs(), {}
 
     def step(self, action):
