@@ -277,14 +277,60 @@ class NewCarlaEnv(gym.Env):
         # Delete sensors, vehicles and walkers
         self._clear_all_actors()
         print("___ actors cleared")
+
+
+        # Spawn Ego
+        while True:
+          carla_map = self.world.get_map()
+
+
+          if(carla_map == None):
+            print("ERROR, map could not be retrieved")
+
+          if(len(self.vehicle_spawn_points) == 0):
+            print("ERROR, no spawn points found") 
+
+          # Choose a random starting location (point A)
+          point_a = random.choice(self.vehicle_spawn_points)
+
+          # Choose a random destination (point B)
+          point_b = random.choice(self.vehicle_spawn_points)
+          while point_b.location == point_a.location:
+              point_b = random.choice(spawn_points)
+
+          print("______ point b chosen")
+          start_waypoint = carla_map.get_waypoint(point_a.location)
+          end_waypoint = carla_map.get_waypoint(point_b.location)
+
+          print("______ waypoints made")
+          self.route = a_star(self.world, start_waypoint, end_waypoint)
+          print("______route made")
+          
+          v = self.world.try_spawn_actor(self.ego_bp, point_a)
+
+          if v is not None:
+            self.ego = v
+            self.things.append(v)
+            break
+          print("Spawn Ego has failed")
+        print("___ ego spawned")
+
+
         
         # Spawn surrounding vehicles
         random.shuffle(self.vehicle_spawn_points)
+        print("spawnpoint count: " + str(len(self.vehicle_spawn_points)))
+        print("number of vehicles " + str(self.number_of_vehicles +1))
         count = self.number_of_vehicles
+
+        assert(len(self.vehicle_spawn_points) >= self.number_of_vehicles +1)
+
+
+        
 
         while count > 0:
           v = self._try_spawn_random_vehicle_at(random.choice(self.vehicle_spawn_points), number_of_wheels=[4])
-          if v != False:
+          if v != False and v != None:
             self.things.append(v)
             count -= 1
 
@@ -303,42 +349,7 @@ class NewCarlaEnv(gym.Env):
         
         print("___ walkers spawned")
         
-        # Spawn Ego
-        while True:
-          carla_map = self.world.get_map()
-          spawn_points = carla_map.get_spawn_points()
-
-          if(carla_map == None):
-            print("ERROR, map could not be retrieved")
-
-          if(len(spawn_points) == 0):
-            print("ERROR, no spawn points found") 
-
-          # Choose a random starting location (point A)
-          point_a = random.choice(spawn_points)
-
-          # Choose a random destination (point B)
-          point_b = random.choice(spawn_points)
-          while point_b.location == point_a.location:
-              point_b = random.choice(spawn_points)
-
-          print("______ point b chosen")
-          start_waypoint = carla_map.get_waypoint(point_a.location)
-          end_waypoint = carla_map.get_waypoint(point_b.location)
-
-          print("______ waypoints made")
-          self.route = a_star(self.world, start_waypoint, end_waypoint)
-          print("______route made")
-          
-          point_a.location.z += 10
-          v = self.world.spawn_actor(self.ego_bp, point_a)
-
-          if v is not None:
-            self.ego = v
-            self.things.append(v)
-            break
-        print("___ ego spawned")
-
+    
         # Add collision sensor
         self.collision_hist = []
 
