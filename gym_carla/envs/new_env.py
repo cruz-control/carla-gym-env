@@ -21,7 +21,9 @@ from gymnasium.utils import seeding
 from skimage.transform import resize
 import carla
 from enum import Enum
-
+import os
+from scipy.ndimage import label
+from PIL import Image
 
 class Turn(Enum):
     LEFT = 1
@@ -164,11 +166,26 @@ params = {
     'town': 'Town03',
     'weather': carla.WeatherParameters.ClearNoon,
     'ego_vehicle_filter': "vehicle.lincoln*",
-    'ego_vehicle_color': '49,8,8'
+    'ego_vehicle_color': '49,8,8',
+
+    'bev_params': {
+        'dim_x': '520',
+        'dim_y': '720',
+        'ego_bev_rgb':  [0,0,255],
+        'ego_bev_tag': 200,
+        'height': 80,
+        'fov': '20'
+    }
 }
+
+
+
 
 class NewCarlaEnv(gym.Env):
     """An OpenAI gym wrapper for CARLA simulator."""
+
+    def disable_vegetation(self):
+        self.world.unload_map_layer(carla.MapLayer.Foliage)
 
     def __init__(self, params=params):
         # parameters
@@ -197,6 +214,7 @@ class NewCarlaEnv(gym.Env):
         # Set weather
         self.world.set_weather(params["weather"])
 
+
         # Get spawn points
         self.vehicle_spawn_points = list(self.world.get_map().get_spawn_points())
 
@@ -212,6 +230,13 @@ class NewCarlaEnv(gym.Env):
         self.ego_bp = self._create_vehicle_bluepprint(
             params["ego_vehicle_filter"], params["ego_vehicle_color"]
         )
+
+        print("starting to do bev things")
+
+
+        #BEV
+
+        self.make_bev_camera_bp(params['bev_params'])
 
         # Collision sensor
         self.collision_hist = []  # The collision history
@@ -258,12 +283,94 @@ class NewCarlaEnv(gym.Env):
         )
         
         self.time_step = 0
+
+
+
+
+        self.bev_output_folder = '/home/ubuntu/bev_output/'
+
+        print("making out dir...")
+        os.makedirs(self.bev_output_folder, exist_ok=True)
+        print("made out dir!")
+
         
         # Set fixed simulation step for synchronous mode
         self._set_synchronous_mode()
         self.things = []
 
+
+        self.disable_vegetation()
+
+
+    def get_ego_mask(self, image):
+        pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() # convert image to numpy array 1D
+        pixel_array = pixel_array.reshape((image.height, image.width, 4)) # convert image to numpy array 2D where each value has BGRA values
+        tags = pixel_array[:, :, 2]  # We only need red channel because it stores semantic tag id, rest is useless
+
+        vehicle_mask = (tags == self.VEHICLE_SEMANTIC_TAG )  # TAG_VEHICLE = 14, only find the ones with tag == TAG_VEHICLE
+        labeled, _ = label(vehicle_mask) # Find each vehicle on the mask and give it a unique ID. 0 = no vehicle, 1+ means yes vehicle
+
+        center_y, center_x = image.height // 2, image.width // 2 # Find center of image, our bev is in the center
+        ego_label = labeled[center_y, center_x] # get the id of vehicle in center. that is ego
+
+        print(f"Tag at center pixel: {tags[center_y, center_x]}")
+        print(f"Ego label at center: {ego_label}")
+        print(f"Unique tags in image: {np.unique(tags)}")
+        print(f"Number of vehicle blobs found: {labeled.max()}")
+
+        return (labeled == ego_label) if ego_label > 0 else None # return mask where ego pixels are true, rest are false. if none we return none, may happen on first frame when vehicle just spawns for some reason!
+
+    def save_humanized_image(self, image, ego_mask):
+        if(random.random() > 0.2):
+            return
+        image.convert(carla.ColorConverter.CityScapesPalette)
+
+        pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() 
+        pixel_array = pixel_array.reshape((image.height, image.width, 4))[:, :, :3]
+        if ego_mask is None:
+            print("ego mask is none!")
+        if ego_mask is not None:
+            pixel_array[ego_mask] = self.ego_bev_rgb
+        
+        humanized_image = pixel_array[:, :, ::-1]
+        Image.fromarray(humanized_image).save(f'{self.bev_output_folder}/frame_{image.frame:06d}.png')
+
+    def update_bev_cam_output(self, image, ego_mask):
+        self.bev_cam_output = None
+    
+    def bev_cam_callback(self, image):
+        ego_mask = self.get_ego_mask(image)
+        self.update_bev_cam_output(image, ego_mask)
+        self.save_humanized_image(image, ego_mask)
+
+    
+
+    def make_bev_camera_bp(self, bev_params):
+        bev_cam_bp = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+        bev_cam_bp.set_attribute('image_size_x', bev_params['dim_x'])
+        bev_cam_bp.set_attribute('image_size_y', bev_params['dim_y'])
+        bev_cam_bp.set_attribute('fov', bev_params['fov'])
+
+        self.ego_bev_rgb = bev_params["ego_bev_rgb"]
+        self.bev_cam_bp = bev_cam_bp
+        self.bev_cam_height = bev_params["height"]
+        self.bev_cam_transform = carla.Transform(carla.Location(x=0, y=0, z=self.bev_cam_height), carla.Rotation(pitch = -90, yaw = 0, roll= 0))
+        self.ego_bev_tag = bev_params["ego_bev_tag"]
+        self.VEHICLE_SEMANTIC_TAG = 14
+        self.bev_cam_output = None
+
+    def spawn_bev_cam(self):
+        self.bev_cam = self.world.spawn_actor(self.bev_cam_bp, self.bev_cam_transform , attach_to=self.ego)
+        self.bev_cam.listen(self.bev_cam_callback)
+        print("BEV attached above vehicle")
+
+
+    def draw_a_start_path(path):
+        for i in range(len(path)-1):
+            carla.DebugHelper.draw_line(begin = path[i+1].Location, end = path[i+2].Location)
+
     def reset(self, seed=None, options={}):
+
         print("Reset function running")
         # Clear sensor objects
         self.collision_sensor = None
@@ -314,6 +421,11 @@ class NewCarlaEnv(gym.Env):
             break
           print("Spawn Ego has failed")
         print("___ ego spawned")
+
+
+        # Spawn BEV
+
+        self.spawn_bev_cam();
 
 
         
@@ -445,8 +557,12 @@ class NewCarlaEnv(gym.Env):
         
         self.time_step = 0
 
+        self.disable_vegetation()
+
         print("___ reset complete")
         return self._get_obs(), {}
+
+        
 
     def step(self, action):
         def map_value(value, from_min, from_max, to_min, to_max):
