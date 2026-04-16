@@ -1,3 +1,4 @@
 /tensorboard*
 /__pycache__
 *.zip
+.vscode/
