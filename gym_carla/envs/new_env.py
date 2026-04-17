@@ -270,13 +270,14 @@ params = {
 class NewCarlaEnv(gym.Env):
     """An OpenAI gym wrapper for CARLA simulator."""
 
-    def disable_uneeded_layers(self):
+    def disable_unneeded_layers(self):
         self.world.unload_map_layer(carla.MapLayer.Foliage)
         self.world.unload_map_layer(carla.MapLayer.Decals)
         self.world.unload_map_layer(carla.MapLayer.Props)
         self.world.unload_map_layer(carla.MapLayer.Particles)
         self.world.unload_map_layer(carla.MapLayer.Buildings)
         self.world.unload_map_layer(carla.MapLayer.Walls)
+        self.world.unload_map_layer(carla.MapLayer.StreetLights)
         
 
     def __init__(self, params=params):
@@ -391,7 +392,7 @@ class NewCarlaEnv(gym.Env):
         self.things = []
 
 
-        self.disable_uneeded_layers()
+        self.disable_unneeded_layers()
 
 
     def get_ego_mask(self, image, search_ahead_pixels=6):
@@ -678,7 +679,7 @@ class NewCarlaEnv(gym.Env):
         
         self.time_step = 0
 
-        self.disable_uneeded_layers()
+        self.disable_unneeded_layers()
 
         print("___ reset complete")
         return self._get_obs(), {}
