@@ -24,6 +24,92 @@ from enum import Enum
 import os
 from scipy.ndimage import label
 from PIL import Image
+import torch
+import torch.nn.functional as torchfunc
+
+SEMANTIC_TAGS = {
+    'unlabeled':    0,
+    'road':         1,
+    'sidewalk':     2,
+    'building':     3,
+    'wall':         4,
+    'fence':        5,
+    'pole':         6,
+    'traffic_light': 7,
+    'traffic_sign': 8,
+    'vegetation':   9,
+    'terrain':      10,
+    'sky':          11,
+    'pedestrian':   12,
+    'rider':        13,
+    'car':          14,
+    'truck':        15,
+    'bus':          16,
+    'train':        17,
+    'motorcycle':   18,
+    'bicycle':      19,
+    'static':       20,
+    'dynamic':      21,
+    'other':        22,
+    'water':        23,
+    'road_line':    24,
+    'ground':       25,
+    'bridge':       26,
+    'rail_track':   27,
+    'guard_rail':   28,
+}
+
+def save_tensor_visualization(tensor, path):
+    # tensor shape: (NUM_CLASSES, H, W)
+    # Convert one-hot back to tag indices by taking argmax across class dimension
+    tag_indices = tensor.argmax(dim=0)  # (H, W)
+    
+    # Convert to numpy
+    tag_indices = tag_indices.numpy().astype(np.uint8)
+    
+    # Remap indices back to colors
+    COLORS = {
+        0:  (0,   0,   0),    # unlabeled
+        1:  (128, 64,  128),  # road
+        2:  (244, 35,  232),  # sidewalk
+        3:  (70,  70,  70),   # building
+        4:  (102, 102, 156),  # wall
+        5:  (190, 153, 153),  # fence
+        6:  (153, 153, 153),  # pole
+        7:  (250, 170, 30),   # traffic light
+        8:  (220, 220, 0),    # traffic sign
+        9:  (107, 142, 35),   # vegetation
+        10: (152, 251, 152),  # terrain
+        11: (70,  130, 180),  # sky
+        12: (220, 20,  60),   # pedestrian
+        13: (255, 0,   0),    # rider
+        14: (0,   0,   142),  # car
+        15: (0,   0,   70),   # truck
+        16: (0,   60,  100),  # bus
+        17: (0,   80,  100),  # train
+        18: (0,   0,   230),  # motorcycle
+        19: (119, 11,  32),   # bicycle
+        20: (110, 190, 160),  # static
+        21: (170, 120, 50),   # dynamic
+        22: (55,  90,  80),   # other
+        23: (45,  60,  150),  # water
+        24: (157, 234, 50),   # road line
+        25: (81,  0,   81),   # ground
+        26: (150, 100, 100),  # bridge
+        27: (230, 150, 140),  # rail track
+        28: (180, 165, 180),  # guard rail
+        29: (255, 0,   0),  # ego — red
+    }
+    
+    # Build RGB image from index map
+    rgb = np.zeros((tag_indices.shape[0], tag_indices.shape[1], 3), dtype=np.uint8)
+    for idx, color in COLORS.items():
+        rgb[tag_indices == idx] = color
+    
+    Image.fromarray(rgb).save(path)
+
+
+
 
 class Turn(Enum):
     LEFT = 1
@@ -184,8 +270,14 @@ params = {
 class NewCarlaEnv(gym.Env):
     """An OpenAI gym wrapper for CARLA simulator."""
 
-    def disable_vegetation(self):
+    def disable_uneeded_layers(self):
         self.world.unload_map_layer(carla.MapLayer.Foliage)
+        self.world.unload_map_layer(carla.MapLayer.Decals)
+        self.world.unload_map_layer(carla.MapLayer.Props)
+        self.world.unload_map_layer(carla.MapLayer.Particles)
+        self.world.unload_map_layer(carla.MapLayer.Buildings)
+        self.world.unload_map_layer(carla.MapLayer.Walls)
+        
 
     def __init__(self, params=params):
         # parameters
@@ -299,10 +391,10 @@ class NewCarlaEnv(gym.Env):
         self.things = []
 
 
-        self.disable_vegetation()
+        self.disable_uneeded_layers()
 
 
-    def get_ego_mask(self, image):
+    def get_ego_mask(self, image, search_ahead_pixels=6):
         pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() # convert image to numpy array 1D
         pixel_array = pixel_array.reshape((image.height, image.width, 4)) # convert image to numpy array 2D where each value has BGRA values
         tags = pixel_array[:, :, 2]  # We only need red channel because it stores semantic tag id, rest is useless
@@ -312,16 +404,30 @@ class NewCarlaEnv(gym.Env):
 
         center_y, center_x = image.height // 2, image.width // 2 # Find center of image, our bev is in the center
         ego_label = labeled[center_y, center_x] # get the id of vehicle in center. that is ego
+        
+
+        #if exact center is obstructed we search forward a bit
+        i = 0
+        while(ego_label == 0):
+            i += 1
+            ego_label = labeled[center_y+i, center_x]
+            if(i > search_ahead_pixels):
+                break
 
         print(f"Tag at center pixel: {tags[center_y, center_x]}")
         print(f"Ego label at center: {ego_label}")
         print(f"Unique tags in image: {np.unique(tags)}")
         print(f"Number of vehicle blobs found: {labeled.max()}")
+        
 
-        return (labeled == ego_label) if ego_label > 0 else None # return mask where ego pixels are true, rest are false. if none we return none, may happen on first frame when vehicle just spawns for some reason!
+         # return mask where ego pixels are true, rest are false. if none we return none, may happen on first frame when vehicle just spawns for some reason!
+        if ego_label > 0:
+            return (labeled == ego_label) 
+        else:
+            return None
 
-    def save_humanized_image(self, image, ego_mask):
-        if(random.random() > 0.2):
+    def save_humanized_image(self, image, ego_mask, percent_to_save=0.2):
+        if(random.random() > percent_to_save):
             return
         image.convert(carla.ColorConverter.CityScapesPalette)
 
@@ -335,13 +441,28 @@ class NewCarlaEnv(gym.Env):
         humanized_image = pixel_array[:, :, ::-1]
         Image.fromarray(humanized_image).save(f'{self.bev_output_folder}/frame_{image.frame:06d}.png')
 
-    def update_bev_cam_output(self, image, ego_mask):
-        self.bev_cam_output = None
-    
+    def update_bev_onehot_tensor(self, image, ego_mask, save_for_debug_percent = 0.2):
+        pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() #get raw data from image as 1D array
+        pixel_array = pixel_array.reshape((image.height, image.width, 4)) #turn it into 2D array
+
+        tags_array = pixel_array[:, :, 2].copy() # only keep red channel. discard the rest. thats where tags are
+
+        # set ego vehicle to ego tag
+        if ego_mask is not None:
+            tags_array[ego_mask] = len(SEMANTIC_TAGS)
+        
+        tensor = torch.from_numpy(tags_array).long() # create a tensor from our tags_array
+        one_hot = torchfunc.one_hot(tensor, num_classes=len(SEMANTIC_TAGS)+1) # one hot encode it, every value will just be a true at its own layer. This will improve learning accuracy
+        one_hot = one_hot.permute(2, 0, 1).float() # format the tensor to be ready for learning
+
+        self.bev_onehot_tensor = one_hot
+        if(random.random() < save_for_debug_percent):
+            save_tensor_visualization(self.bev_onehot_tensor, f'{self.bev_output_folder}/tensor_{image.frame:06d}.png')
+
     def bev_cam_callback(self, image):
         ego_mask = self.get_ego_mask(image)
-        self.update_bev_cam_output(image, ego_mask)
-        self.save_humanized_image(image, ego_mask)
+        self.update_bev_onehot_tensor(image, ego_mask)
+        #self.save_humanized_image(image, ego_mask)
 
     
 
@@ -357,7 +478,7 @@ class NewCarlaEnv(gym.Env):
         self.bev_cam_transform = carla.Transform(carla.Location(x=0, y=0, z=self.bev_cam_height), carla.Rotation(pitch = -90, yaw = 0, roll= 0))
         self.ego_bev_tag = bev_params["ego_bev_tag"]
         self.VEHICLE_SEMANTIC_TAG = 14
-        self.bev_cam_output = None
+        self.bev_onehot_tensor = None
 
     def spawn_bev_cam(self):
         self.bev_cam = self.world.spawn_actor(self.bev_cam_bp, self.bev_cam_transform , attach_to=self.ego)
@@ -557,7 +678,7 @@ class NewCarlaEnv(gym.Env):
         
         self.time_step = 0
 
-        self.disable_vegetation()
+        self.disable_uneeded_layers()
 
         print("___ reset complete")
         return self._get_obs(), {}
