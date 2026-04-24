@@ -26,6 +26,7 @@ from scipy.ndimage import label
 from PIL import Image
 import torch
 import torch.nn.functional as torchfunc
+import math
 
 SEMANTIC_TAGS = {
     'unlabeled':    0,
@@ -57,6 +58,8 @@ SEMANTIC_TAGS = {
     'bridge':       26,
     'rail_track':   27,
     'guard_rail':   28,
+    'ego': 29, #custom tag
+    'route':30 #custom tag
 }
 
 def save_tensor_visualization(tensor, path):
@@ -82,7 +85,7 @@ def save_tensor_visualization(tensor, path):
         10: (152, 251, 152),  # terrain
         11: (70,  130, 180),  # sky
         12: (220, 20,  60),   # pedestrian
-        13: (255, 0,   0),    # rider
+        13: (200, 0,   55),    # rider
         14: (0,   0,   142),  # car
         15: (0,   0,   70),   # truck
         16: (0,   60,  100),  # bus
@@ -98,7 +101,8 @@ def save_tensor_visualization(tensor, path):
         26: (150, 100, 100),  # bridge
         27: (230, 150, 140),  # rail track
         28: (180, 165, 180),  # guard rail
-        29: (255, 0,   0),  # ego — red
+        29: (255, 0,   0),    # ego — red
+        30: (255, 255, 255),  # route — white
     }
     
     # Build RGB image from index map
@@ -106,10 +110,18 @@ def save_tensor_visualization(tensor, path):
     for idx, color in COLORS.items():
         rgb[tag_indices == idx] = color
     
+
+    route_channel = tensor[SEMANTIC_TAGS['route']].numpy()
+    rgb[route_channel == 1] = COLORS[SEMANTIC_TAGS['route']]
+
     Image.fromarray(rgb).save(path)
 
 
+def lerp(x1, y1, x2, y2, f):
+    x = x1 * (1-f) + x2*f
+    y = y1 * (1-f) +y2*f
 
+    return (x, y)
 
 class Turn(Enum):
     LEFT = 1
@@ -243,6 +255,7 @@ def a_star(
     return None
 
 
+
 params = {
     'number_of_vehicles': 1,
     'number_of_walkers': 0,
@@ -324,7 +337,6 @@ class NewCarlaEnv(gym.Env):
             params["ego_vehicle_filter"], params["ego_vehicle_color"]
         )
 
-        print("starting to do bev things")
 
 
         #BEV
@@ -394,6 +406,10 @@ class NewCarlaEnv(gym.Env):
 
         self.disable_unneeded_layers()
 
+    def draw_a_start_path_in_simulation(self, path):
+        for i in range(len(path)-1):
+            self.world.debug.draw_line(begin = path[i].transform.location, end = path[i+1].transform.location, life_time=60.0)
+
 
     def get_ego_mask(self, image, search_ahead_pixels=6):
         pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() # convert image to numpy array 1D
@@ -415,10 +431,6 @@ class NewCarlaEnv(gym.Env):
             if(i > search_ahead_pixels):
                 break
 
-        print(f"Tag at center pixel: {tags[center_y, center_x]}")
-        print(f"Ego label at center: {ego_label}")
-        print(f"Unique tags in image: {np.unique(tags)}")
-        print(f"Number of vehicle blobs found: {labeled.max()}")
         
 
          # return mask where ego pixels are true, rest are false. if none we return none, may happen on first frame when vehicle just spawns for some reason!
@@ -427,6 +439,59 @@ class NewCarlaEnv(gym.Env):
         else:
             return None
 
+
+            
+
+
+    def draw_circle_for_bev(self, x, y, radius, target):
+        for ox in range(-radius, radius+1):
+            for oy in range(-radius, radius+1):
+                if ox**2 + oy**2 <= radius**2:  # circle with radius 3
+                    nx, ny = x + ox, y + oy
+                    if 0 <= nx < self.bev_cam_x_dim and 0 <= ny <  self.bev_cam_y_dim :
+                        target[ny, nx] = 1
+
+
+    def get_astar_route_mask(self, route, point_frequency):
+        """Creates a binary 2D mask with 1s where waypoints are projected"""
+        mask = np.zeros(( self.bev_cam_y_dim ,  self.bev_cam_x_dim ), dtype=np.uint8)
+        
+        ego_loc = self.ego.get_location()
+        fov = float(self.bev_cam.attributes['fov'])
+        scale = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_y_dim
+
+        for i in range(len(route)):
+            wp = route[i]
+            next_wp = wp
+            if i < len(route)-1:
+                next_wp = route[i+1]
+
+
+            loc = wp.transform.location
+            dx = loc.x - ego_loc.x
+            dy = loc.y - ego_loc.y
+
+            px = int( self.bev_cam_x_dim/ 2 + dx / scale)
+            py = int( self.bev_cam_y_dim / 2 + dy / scale)
+
+
+            next_loc = next_wp.transform.location
+            next_dx = next_loc.x - ego_loc.x
+            next_dy = next_loc.y - ego_loc.y
+
+            next_px = int( self.bev_cam_x_dim/ 2 + next_dx / scale)
+            next_py = int( self.bev_cam_y_dim / 2 + next_dy / scale)
+
+
+            for j in range(point_frequency):
+                ix, iy = lerp(px, py, next_px, next_py, 1-j/point_frequency)
+                self.draw_circle_for_bev(int(ix), int(iy), 3, mask)
+
+        print("___nonzero values in route mask before returning: " + str(np.count_nonzero(mask)))
+        print("__waipoints total: " + str(len(self.route)))
+        return mask
+    
+    #depreciated, do not use. use save_tensor_visualization instead
     def save_humanized_image(self, image, ego_mask, percent_to_save=0.2):
         if(random.random() > percent_to_save):
             return
@@ -441,8 +506,8 @@ class NewCarlaEnv(gym.Env):
         
         humanized_image = pixel_array[:, :, ::-1]
         Image.fromarray(humanized_image).save(f'{self.bev_output_folder}/frame_{image.frame:06d}.png')
-
-    def update_bev_onehot_tensor(self, image, ego_mask, save_for_debug_percent = 0.2):
+    
+    def update_bev_onehot_tensor(self, image, ego_mask, route_mask, save_for_debug_percent = 0.2):
         pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() #get raw data from image as 1D array
         pixel_array = pixel_array.reshape((image.height, image.width, 4)) #turn it into 2D array
 
@@ -450,19 +515,32 @@ class NewCarlaEnv(gym.Env):
 
         # set ego vehicle to ego tag
         if ego_mask is not None:
-            tags_array[ego_mask] = len(SEMANTIC_TAGS)
+            tags_array[ego_mask] = SEMANTIC_TAGS['ego']
+    
         
         tensor = torch.from_numpy(tags_array).long() # create a tensor from our tags_array
-        one_hot = torchfunc.one_hot(tensor, num_classes=len(SEMANTIC_TAGS)+1) # one hot encode it, every value will just be a true at its own layer. This will improve learning accuracy
+        one_hot = torchfunc.one_hot(tensor, num_classes=len(SEMANTIC_TAGS)) # one hot encode it, every value will just be a true at its own layer. This will improve learning accuracy
         one_hot = one_hot.permute(2, 0, 1).float() # format the tensor to be ready for learning
 
+        # add A* layer
+        if route_mask is not None:
+            route_tensor = torch.from_numpy(route_mask).float().unsqueeze(0)
+            one_hot[SEMANTIC_TAGS['route']] = torch.from_numpy(route_mask).float()
+
+
+        print("route mask is none: " + str(route_mask is None))
+        print("___nonzero values in route mask after returning: " + str(np.count_nonzero(route_mask)))
+        print("nonzero route pixels in tensor: " + str(one_hot[30].sum().item()))
+
+        # save results
         self.bev_onehot_tensor = one_hot
         if(random.random() < save_for_debug_percent):
             save_tensor_visualization(self.bev_onehot_tensor, f'{self.bev_output_folder}/tensor_{image.frame:06d}.png')
 
     def bev_cam_callback(self, image):
         ego_mask = self.get_ego_mask(image)
-        self.update_bev_onehot_tensor(image, ego_mask)
+        route_mask = self.get_astar_route_mask(self.route, 3)
+        self.update_bev_onehot_tensor(image, ego_mask, route_mask)
         #self.save_humanized_image(image, ego_mask)
 
     
@@ -484,16 +562,15 @@ class NewCarlaEnv(gym.Env):
     def spawn_bev_cam(self):
         self.bev_cam = self.world.spawn_actor(self.bev_cam_bp, self.bev_cam_transform , attach_to=self.ego)
         self.bev_cam.listen(self.bev_cam_callback)
-        print("BEV attached above vehicle")
+        self.bev_cam_x_dim = int(self.bev_cam.attributes['image_size_x'])
+        self.bev_cam_y_dim = int(self.bev_cam.attributes['image_size_y'])
 
 
-    def draw_a_start_path(path):
-        for i in range(len(path)-1):
-            carla.DebugHelper.draw_line(begin = path[i+1].Location, end = path[i+2].Location)
+
+    
 
     def reset(self, seed=None, options={}):
 
-        print("Reset function running")
         # Clear sensor objects
         self.collision_sensor = None
         self.lidar_sensor = None
@@ -501,11 +578,9 @@ class NewCarlaEnv(gym.Env):
         self.camera2_sensor = None
         self.camera3_sensor = None
         self.camera4_sensor = None
-        print("___ sensors cleared")
 
         # Delete sensors, vehicles and walkers
         self._clear_all_actors()
-        print("___ actors cleared")
 
 
         # Spawn Ego
@@ -527,13 +602,10 @@ class NewCarlaEnv(gym.Env):
           while point_b.location == point_a.location:
               point_b = random.choice(spawn_points)
 
-          print("______ point b chosen")
           start_waypoint = carla_map.get_waypoint(point_a.location)
           end_waypoint = carla_map.get_waypoint(point_b.location)
 
-          print("______ waypoints made")
           self.route = a_star(self.world, start_waypoint, end_waypoint)
-          print("______route made")
           
           v = self.world.try_spawn_actor(self.ego_bp, point_a)
 
@@ -542,19 +614,16 @@ class NewCarlaEnv(gym.Env):
             self.things.append(v)
             break
           print("Spawn Ego has failed")
-        print("___ ego spawned")
 
 
         # Spawn BEV
 
-        self.spawn_bev_cam();
+        self.spawn_bev_cam()
 
 
         
         # Spawn surrounding vehicles
         random.shuffle(self.vehicle_spawn_points)
-        print("spawnpoint count: " + str(len(self.vehicle_spawn_points)))
-        print("number of vehicles " + str(self.number_of_vehicles +1))
         count = self.number_of_vehicles
 
         assert(len(self.vehicle_spawn_points) >= self.number_of_vehicles +1)
@@ -568,7 +637,6 @@ class NewCarlaEnv(gym.Env):
             self.things.append(v)
             count -= 1
 
-        print("___ vehicles spawned")
         
 
         # Spawn pedestrians
@@ -581,7 +649,6 @@ class NewCarlaEnv(gym.Env):
             self.things.append(v)
             count -= 1
         
-        print("___ walkers spawned")
         
     
         # Add collision sensor
@@ -668,7 +735,6 @@ class NewCarlaEnv(gym.Env):
         )
         self.things.append(self.camera_sensor4)
         self.camera_sensor4.listen(lambda data: get_camera_img4(data))
-        print("___ cameras spawned")
         # Set waypoint calc for reward
         _, waypoint, dist = get_closest_waypoint(self.route, self.ego.get_location())
         self.prev_waypoint = waypoint
@@ -680,8 +746,8 @@ class NewCarlaEnv(gym.Env):
         self.time_step = 0
 
         self.disable_unneeded_layers()
+        self.draw_a_start_path_in_simulation(self.route)
 
-        print("___ reset complete")
         return self._get_obs(), {}
 
         
