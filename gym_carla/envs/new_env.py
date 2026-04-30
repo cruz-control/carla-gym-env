@@ -434,12 +434,57 @@ class NewCarlaEnv(gym.Env):
         self.set_up_inspector_camera(cam_transform)
 
 
+    # does not fully work. Does not fully cover blue parts of the ego vehicle
+    def approximate_ego_mask(self):
+        mask = np.zeros((self.bev_cam_y_dim, self.bev_cam_x_dim), dtype=np.uint8)
+
+        bb = self.ego.bounding_box.extent
+        vehicle_length = bb.x * 2
+        vehicle_width  = bb.y * 2
+
+        fov = float(self.bev_cam.attributes['fov'])
+        scale = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_x_dim
+
+
+        length_px = int(1.15 * vehicle_length / scale)
+        width_px  = int(1.0 *vehicle_width  / scale)
+
+        cx = self.bev_cam_x_dim // 2
+        cy = self.bev_cam_y_dim // 2
+
+        x1 = cx - width_px  // 2
+        x2 = cx + width_px  // 2
+        y1 = cy - length_px // 2 
+        y2 = cy + length_px // 2
+
+        x1 = max(0, x1)
+        x2 = min(self.bev_cam_x_dim, x2)
+        y1 = max(0, y1)
+        y2 = min(self.bev_cam_y_dim, y2)
+
+        # Draw main body rectangle (rear 3/4 of vehicle)
+        front_start = y1 - length_px //7
+        body_start  = y1 + length_px //6  # front quarter is the pointed part
+        mask[body_start:y2, x1:x2] = 1
+
+        # Draw pointed front — each row gets narrower toward the tip
+        for row in range(front_start, body_start):
+            t = (row - front_start) / (body_start - front_start)
+            row_width = int(width_px * t)
+            row_cx = (x1 + x2) // 2
+            row_x1 = max(0, row_cx - row_width // 2)
+            row_x2 = min(self.bev_cam_x_dim, row_cx + row_width // 2)
+            mask[row, row_x1:row_x2] = 1
+
+        return mask.astype(bool)
+
     def get_ego_mask(self, image, search_ahead_pixels=6):
+
         pixel_array = np.frombuffer(image.raw_data, dtype=np.uint8).copy() # convert image to numpy array 1D
         pixel_array = pixel_array.reshape((image.height, image.width, 4)) # convert image to numpy array 2D where each value has BGRA values
         tags = pixel_array[:, :, 2]  # We only need red channel because it stores semantic tag id, rest is useless
 
-        vehicle_mask = (tags == self.VEHICLE_SEMANTIC_TAG )  # TAG_VEHICLE = 14, only find the ones with tag == TAG_VEHICLE
+        vehicle_mask = (tags == SEMANTIC_TAGS["car"])  # TAG_VEHICLE = 14, only find the ones with tag == TAG_VEHICLE
         labeled, _ = label(vehicle_mask) # Find each vehicle on the mask and give it a unique ID. 0 = no vehicle, 1+ means yes vehicle
 
         center_y, center_x = image.height // 2, image.width // 2 # Find center of image, our bev is in the center
@@ -460,7 +505,7 @@ class NewCarlaEnv(gym.Env):
         if ego_label > 0:
             return (labeled == ego_label) 
         else:
-            return None
+            return self.approximate_ego_mask()
     
 
     def world_to_bev_pixel(self, world_location):
@@ -485,12 +530,12 @@ class NewCarlaEnv(gym.Env):
 
         # Scale from world space to pixel space using FOV and height
         fov = float(self.bev_cam.attributes['fov'])
-        scale_x = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_x_dim
-        scale_y = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_y_dim
+        scale = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_x_dim
 
-        px = int(self.bev_cam_x_dim / 2 + cam_y / scale_x)
-        py = int(self.bev_cam_y_dim / 2 - cam_x / scale_y)
+        px = int(self.bev_cam_x_dim / 2 + cam_y / scale)
+        py = int(self.bev_cam_y_dim / 2 - cam_x / scale)
 
+    
         # Return None if outside image bounds
         if not (0 <= px < self.bev_cam_x_dim and 0 <= py < self.bev_cam_y_dim):
             return None
@@ -538,7 +583,7 @@ class NewCarlaEnv(gym.Env):
 
 
             for j in range(point_frequency):
-                ix, iy = lerp(px, py, next_px, next_py, 1-j/point_frequency)
+                ix, iy = lerp(px, py, next_px, next_py, j/point_frequency)
                 self.draw_circle_for_bev(int(ix), int(iy), 3, mask)
 
         return mask
@@ -591,6 +636,12 @@ class NewCarlaEnv(gym.Env):
         ego_mask = self.get_ego_mask(image)
         route_mask = self.get_astar_route_mask(self.route, 1)
         self.update_bev_onehot_tensor(image, ego_mask, route_mask)
+        first_wp = self.route[0]
+        pixel = self.world_to_bev_pixel(first_wp.transform.location)
+        ego_pixel = self.world_to_bev_pixel(self.ego.get_location())
+        print(f"First waypoint pixel: {pixel}")
+        print(f"Ego pixel: {ego_pixel}")
+        print(f"Image center: ({self.bev_cam_x_dim//2}, {self.bev_cam_y_dim//2})")
         #self.save_humanized_image(image, ego_mask)
 
     
@@ -605,7 +656,7 @@ class NewCarlaEnv(gym.Env):
         self.bev_cam_bp = bev_cam_bp
         self.bev_cam_height = bev_params["height"]
         self.bev_cam_transform = carla.Transform(carla.Location(x=0, y=0, z=self.bev_cam_height), carla.Rotation(pitch = -90, yaw = 0, roll= 0))
-        self.VEHICLE_SEMANTIC_TAG = 14
+
         self.bev_onehot_tensor = None
 
     def spawn_bev_cam(self):
