@@ -264,15 +264,15 @@ params = {
     'connection_timeout': 100,
     'town': 'Town03',
     'weather': carla.WeatherParameters.ClearNoon,
-    'ego_vehicle_filter': "vehicle.lincoln*",
-    'ego_vehicle_color': '49,8,8',
+    'ego_vehicle_filter': "vehicle.tesla.model3*",
+    'ego_vehicle_color': '0,255,115',
+    'spectator_height': 50,
 
     'bev_params': {
         'dim_x': '520',
         'dim_y': '720',
-        'ego_bev_rgb':  [0,0,255],
-        'ego_bev_tag': 200,
-        'height': 80,
+        'ego_bev_rgb':  [0,0,255], # Depreciated
+        'height': 120,
         'fov': '20'
     }
 }
@@ -281,7 +281,6 @@ params = {
 
 
 class NewCarlaEnv(gym.Env):
-    """An OpenAI gym wrapper for CARLA simulator."""
 
     def disable_unneeded_layers(self):
         self.world.unload_map_layer(carla.MapLayer.Foliage)
@@ -319,6 +318,7 @@ class NewCarlaEnv(gym.Env):
 
         # Set weather
         self.world.set_weather(params["weather"])
+        self.spectator_height = params["spectator_height"]
 
 
         # Get spawn points
@@ -406,9 +406,32 @@ class NewCarlaEnv(gym.Env):
 
         self.disable_unneeded_layers()
 
-    def draw_a_start_path_in_simulation(self, path):
+    def draw_a_start_path_in_simulation(self, path, lifetime = 1):
         for i in range(len(path)-1):
-            self.world.debug.draw_line(begin = path[i].transform.location, end = path[i+1].transform.location, life_time=60.0)
+            begin=carla.Location(
+                x=path[i].transform.location.x,
+                y=path[i].transform.location.y,
+                z=path[i].transform.location.z + 3  # lift off ground
+            )
+            end=carla.Location(
+                x=path[i+1].transform.location.x,
+                y=path[i+1].transform.location.y,
+                z=path[i+1].transform.location.z + 3  # lift off ground
+            )
+            self.world.debug.draw_line(begin, end =end, thickness=0.1, color = carla.Color(255,0,0), life_time = lifetime)
+            self.world.debug.draw_point(begin, size=0.05, color=carla.Color(255,0,0), life_time = lifetime)
+
+
+
+    def set_up_inspector_camera(self, desired_transform = carla.Transform(carla.Location(0,0,100), carla.Rotation(pitch=-90, yaw=0, roll=0))):
+        spectator = self.world.get_spectator()
+        spectator.set_transform(desired_transform)
+
+    def attach_spectator_above_ego(self, height):
+        cam_transform = self.ego.get_transform()
+        cam_transform.location.z = height
+        cam_transform.rotation.pitch = -90
+        self.set_up_inspector_camera(cam_transform)
 
 
     def get_ego_mask(self, image, search_ahead_pixels=6):
@@ -438,9 +461,42 @@ class NewCarlaEnv(gym.Env):
             return (labeled == ego_label) 
         else:
             return None
+    
 
+    def world_to_bev_pixel(self, world_location):
+        """
+        Convert a world coordinate to BEV camera pixel coordinates.
+        Accounts for FOV, camera height, camera yaw rotation, and image dimensions.
+        
+        Returns (px, py) or None if the point is outside the camera's view.
+        """
+        ego_transform = self.ego.get_transform()
+        ego_loc = ego_transform.location
+        cam_yaw = ego_transform.rotation.yaw  # camera rotates with ego
 
-            
+        # Vector from camera to point in world space
+        dx = world_location.x - ego_loc.x
+        dy = world_location.y - ego_loc.y
+
+        # Rotate vector into camera space (account for camera yaw)
+        yaw_rad = math.radians(cam_yaw)
+        cam_x =  dx * math.cos(yaw_rad) + dy * math.sin(yaw_rad)
+        cam_y = -dx * math.sin(yaw_rad) + dy * math.cos(yaw_rad)
+
+        # Scale from world space to pixel space using FOV and height
+        fov = float(self.bev_cam.attributes['fov'])
+        scale_x = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_x_dim
+        scale_y = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_y_dim
+
+        px = int(self.bev_cam_x_dim / 2 + cam_y / scale_x)
+        py = int(self.bev_cam_y_dim / 2 - cam_x / scale_y)
+
+        # Return None if outside image bounds
+        if not (0 <= px < self.bev_cam_x_dim and 0 <= py < self.bev_cam_y_dim):
+            return None
+
+        return (px, py)
+                
 
 
     def draw_circle_for_bev(self, x, y, radius, target):
@@ -455,10 +511,6 @@ class NewCarlaEnv(gym.Env):
     def get_astar_route_mask(self, route, point_frequency):
         """Creates a binary 2D mask with 1s where waypoints are projected"""
         mask = np.zeros(( self.bev_cam_y_dim ,  self.bev_cam_x_dim ), dtype=np.uint8)
-        
-        ego_loc = self.ego.get_location()
-        fov = float(self.bev_cam.attributes['fov'])
-        scale = (2 * self.bev_cam_height * math.tan(math.radians(fov / 2))) / self.bev_cam_y_dim
 
         for i in range(len(route)):
             wp = route[i]
@@ -467,29 +519,30 @@ class NewCarlaEnv(gym.Env):
                 next_wp = route[i+1]
 
 
-            loc = wp.transform.location
-            dx = loc.x - ego_loc.x
-            dy = loc.y - ego_loc.y
 
-            px = int( self.bev_cam_x_dim/ 2 + dx / scale)
-            py = int( self.bev_cam_y_dim / 2 + dy / scale)
+            result = self.world_to_bev_pixel(wp.transform.location)
+
+            if(result is None):
+                continue
+
+            px, py = result
 
 
-            next_loc = next_wp.transform.location
-            next_dx = next_loc.x - ego_loc.x
-            next_dy = next_loc.y - ego_loc.y
+            result = self.world_to_bev_pixel(next_wp.transform.location)
 
-            next_px = int( self.bev_cam_x_dim/ 2 + next_dx / scale)
-            next_py = int( self.bev_cam_y_dim / 2 + next_dy / scale)
+
+            if(result is None):
+                next_px, next_py = px,py
+            else:
+                next_px, next_py = result
 
 
             for j in range(point_frequency):
                 ix, iy = lerp(px, py, next_px, next_py, 1-j/point_frequency)
                 self.draw_circle_for_bev(int(ix), int(iy), 3, mask)
 
-        print("___nonzero values in route mask before returning: " + str(np.count_nonzero(mask)))
-        print("__waipoints total: " + str(len(self.route)))
         return mask
+
     
     #depreciated, do not use. use save_tensor_visualization instead
     def save_humanized_image(self, image, ego_mask, percent_to_save=0.2):
@@ -528,9 +581,6 @@ class NewCarlaEnv(gym.Env):
             one_hot[SEMANTIC_TAGS['route']] = torch.from_numpy(route_mask).float()
 
 
-        print("route mask is none: " + str(route_mask is None))
-        print("___nonzero values in route mask after returning: " + str(np.count_nonzero(route_mask)))
-        print("nonzero route pixels in tensor: " + str(one_hot[30].sum().item()))
 
         # save results
         self.bev_onehot_tensor = one_hot
@@ -539,7 +589,7 @@ class NewCarlaEnv(gym.Env):
 
     def bev_cam_callback(self, image):
         ego_mask = self.get_ego_mask(image)
-        route_mask = self.get_astar_route_mask(self.route, 3)
+        route_mask = self.get_astar_route_mask(self.route, 1)
         self.update_bev_onehot_tensor(image, ego_mask, route_mask)
         #self.save_humanized_image(image, ego_mask)
 
@@ -555,7 +605,6 @@ class NewCarlaEnv(gym.Env):
         self.bev_cam_bp = bev_cam_bp
         self.bev_cam_height = bev_params["height"]
         self.bev_cam_transform = carla.Transform(carla.Location(x=0, y=0, z=self.bev_cam_height), carla.Rotation(pitch = -90, yaw = 0, roll= 0))
-        self.ego_bev_tag = bev_params["ego_bev_tag"]
         self.VEHICLE_SEMANTIC_TAG = 14
         self.bev_onehot_tensor = None
 
@@ -572,6 +621,10 @@ class NewCarlaEnv(gym.Env):
     def reset(self, seed=None, options={}):
 
         # Clear sensor objects
+
+        
+
+
         self.collision_sensor = None
         self.lidar_sensor = None
         self.camera_sensor = None
@@ -614,6 +667,8 @@ class NewCarlaEnv(gym.Env):
             self.things.append(v)
             break
           print("Spawn Ego has failed")
+        
+
 
 
         # Spawn BEV
@@ -746,13 +801,19 @@ class NewCarlaEnv(gym.Env):
         self.time_step = 0
 
         self.disable_unneeded_layers()
-        self.draw_a_start_path_in_simulation(self.route)
+
+
+
 
         return self._get_obs(), {}
 
         
 
     def step(self, action):
+
+        
+        
+        
         def map_value(value, from_min, from_max, to_min, to_max):
             """Maps a value from one range to another."""
             from_range = from_max - from_min
@@ -771,6 +832,9 @@ class NewCarlaEnv(gym.Env):
         self.ego.apply_control(act)
 
         self.world.tick()
+
+        self.attach_spectator_above_ego(self.spectator_height)
+        self.draw_a_start_path_in_simulation(self.route)
 
         _, _, dist = get_closest_waypoint(self.route, self.ego.get_location())
 
