@@ -264,7 +264,7 @@ params = {
     'connection_timeout': 100,
     'town': 'Town03',
     'weather': carla.WeatherParameters.ClearNoon,
-    'ego_vehicle_filter': "vehicle.tesla.model3*",
+    'ego_vehicle_filter': "vehicle.mini.cooper_s_2021",
     'ego_vehicle_color': '0,255,115',
     'spectator_height': 50,
 
@@ -272,7 +272,7 @@ params = {
         'dim_x': '520',
         'dim_y': '720',
         'ego_bev_rgb':  [0,0,255], # Depreciated
-        'height': 120,
+        'height': 200,
         'fov': '20'
     }
 }
@@ -505,7 +505,7 @@ class NewCarlaEnv(gym.Env):
         if ego_label > 0:
             return (labeled == ego_label) 
         else:
-            return self.approximate_ego_mask()
+            return None #self.approximate_ego_mask()
     
 
     def world_to_bev_pixel(self, world_location):
@@ -634,14 +634,8 @@ class NewCarlaEnv(gym.Env):
 
     def bev_cam_callback(self, image):
         ego_mask = self.get_ego_mask(image)
-        route_mask = self.get_astar_route_mask(self.route, 1)
+        route_mask = self.get_astar_route_mask(self.route, point_frequency = 4)
         self.update_bev_onehot_tensor(image, ego_mask, route_mask)
-        first_wp = self.route[0]
-        pixel = self.world_to_bev_pixel(first_wp.transform.location)
-        ego_pixel = self.world_to_bev_pixel(self.ego.get_location())
-        print(f"First waypoint pixel: {pixel}")
-        print(f"Ego pixel: {ego_pixel}")
-        print(f"Image center: ({self.bev_cam_x_dim//2}, {self.bev_cam_y_dim//2})")
         #self.save_humanized_image(image, ego_mask)
 
     
