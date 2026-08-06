@@ -147,7 +147,7 @@ def get_closest_waypoint(route, curr_location):
             closest_waypoint = waypoint
             previous_dist = dist
 
-        return i, closest_waypoint, previous_dist
+    return i, closest_waypoint, previous_dist
 
 
 def euclidean_heuristic(waypoint, end_waypoint):
@@ -292,6 +292,32 @@ class NewCarlaEnv(gym.Env):
         self.world.unload_map_layer(carla.MapLayer.StreetLights)
         
 
+    def _find_blueprint_or_fail(self, blueprint_id, component_name):
+        try:
+            bp = self.world.get_blueprint_library().find(blueprint_id)
+        except (RuntimeError, IndexError) as e:
+            category = blueprint_id.split('.')[0] if '.' in blueprint_id else ""
+            filter_str = f"{category}.*" if category else "*"
+            available_bps = [bp.id for bp in self.world.get_blueprint_library().filter(filter_str)]
+            
+            report = (
+                "\n========== FAILURE REPORT ==========\n"
+                "  Stage:       Environment Initialization\n"
+                f"  Component:   {component_name} Blueprint Lookup\n"
+                f"  Blueprint:   '{blueprint_id}'\n"
+                f"  Raw Error:   {e}\n"
+                "\n"
+                "  Possible Causes:\n"
+                f"    1. '{blueprint_id}' does not exist in this CARLA version.\n"
+                "    2. The blueprint was renamed or removed in a newer CARLA release.\n"
+                "\n"
+            )
+
+            report += "====================================\n"
+            print(report)
+            raise RuntimeError(report) from e
+        return bp
+
     def __init__(self, params=params):
         # parameters
         self.number_of_vehicles = params["number_of_vehicles"]
@@ -301,18 +327,56 @@ class NewCarlaEnv(gym.Env):
         self.action_space = spaces.Box(
             low=-1, high=1, shape=(3,), dtype=np.float32
         )  # throttle, braking, steering
-        
         self.observation_space = spaces.Box(
             low=0, high=255, shape=(786532,), dtype=np.float32
         )
 
         # Connect to carla server and get world object
         print("connecting to Carla server...")
-        self.client = carla.Client("localhost", params["port"])
-        self.client.set_timeout(params["connection_timeout"])
-        #self.world = self.client.load_world(params['town'])
-        self.world = self.client.get_world()
+        try:
+            self.client = carla.Client("localhost", params["port"])
+            self.client.set_timeout(params["connection_timeout"])
+            #self.world = self.client.load_world(params['town'])
+            self.world = self.client.get_world()
+        except RuntimeError as e:
+            error_msg = str(e)  # we figure out what's going on fromt he error message that Carla provides
+            # for now I made the report just a string, because I am not sure whether we want to have a report as a seperate file or just a terminal message.
+            # it should be easy to change from one to another.
+            report = (
+                "\n========== FAILURE REPORT ==========\n"
+                f"  Stage:       Environment Initialization\n"
+                f"  Component:   CARLA Server Connection\n"
+                f"  Port:        {params['port']}\n" # this is the port that we tried to connect
+                f"  Timeout:     {params['connection_timeout']}s\n"
+                f"  Raw Error:   {error_msg}\n"
+                "\n"
+                "  Possible Causes:\n"
+            )
 
+            if "time-out" in error_msg.lower(): #these are the possible scenarios if the word time-out is inside the error message
+                report += (
+                    "    1. CarlaUE4.exe is not running. Make sure Carla is running, before running the script. Sometimes restarting carla helps. a previous script can leave the server in a bad state.\n"
+                    "    2. Wrong port number. Check the port number for Carla (generally its 2000)\n"
+                    f"       Your current port is {params['port']}.\n"
+                    "    3. Firewall is blocking the connection.\n"
+                    "    4. Timeout value might have been set too low for the current machine.\n"
+                    f"       You provided connection_timeout={params['connection_timeout']}s.\n"
+                )
+            elif "rpc" in error_msg.lower():
+                report += (
+                    "    1. CARLA client/server version mismatch.\n"
+                    "       Ensure your 'carla' Python package matches the CarlaUE4 version.\n"
+                    "    2. The server might have crashed try restarting CarlaUE4.exe.\n"
+                )
+            else:
+                report += (
+                    "    1. Unknown connection error. Look into the raw error message for hints.\n"
+                    f"       Raw error: {error_msg}\n"
+                )
+
+            report += "====================================\n"
+            print(report)
+            raise RuntimeError(report) from e
 
         print("Carla server connected!")
 
@@ -322,7 +386,40 @@ class NewCarlaEnv(gym.Env):
 
 
         # Get spawn points
-        self.vehicle_spawn_points = list(self.world.get_map().get_spawn_points())
+        try:
+            carla_map = self.world.get_map()
+        except RuntimeError as e:
+            report = (
+                "\n========== FAILURE REPORT ==========\n"
+                "  Stage:       Environment Initialization\n"
+                "  Component:   Map Retrieval\n"
+                f"  Raw Error:   {e}\n"
+                "\n"
+                "  Possible Causes:\n"
+                "    1. The CARLA world has no map loaded.\n"
+                "    2. The server is mid-reload. Try again after a few seconds.\n"
+                "    3. client.reload_world() was called and hasn't finished.\n"
+                "====================================\n"
+            )
+            print(report)
+            raise RuntimeError(report) from e
+
+        if carla_map is None:
+            report = (
+                "\n========== FAILURE REPORT ==========\n"
+                "  Stage:       Environment Initialization\n"
+                "  Component:   Map Retrieval\n"
+                "  Raw Error:   world.get_map() returned None\n"
+                "\n"
+                "  Possible Causes:\n"
+                "    1. The CARLA world has no map loaded.\n"
+                "    2. The server is mid-reload. Restart CarlaUE4.exe.\n"
+                "====================================\n"
+            )
+            print(report)
+            raise RuntimeError(report)
+
+        self.vehicle_spawn_points = list(carla_map.get_spawn_points())
 
         self.walker_spawn_points = []
         for i in range(self.number_of_walkers):
@@ -346,15 +443,15 @@ class NewCarlaEnv(gym.Env):
         # Collision sensor
         self.collision_hist = []  # The collision history
         self.collision_hist_l = 1  # collision history length
-        self.collision_bp = self.world.get_blueprint_library().find(
-            "sensor.other.collision"
+        self.collision_bp = self._find_blueprint_or_fail(
+            "sensor.other.collision", "Collision Sensor"
         )
 
         # Lidar sensor
         self.lidar_data = None
         self.lidar_height = 1.8
         self.lidar_trans = carla.Transform(carla.Location(x=-0.5, z=self.lidar_height))
-        self.lidar_bp = self.world.get_blueprint_library().find("sensor.lidar.ray_cast")
+        self.lidar_bp = self._find_blueprint_or_fail("sensor.lidar.ray_cast", "Lidar Sensor")
         self.lidar_bp.set_attribute("channels", "64.0")
         self.lidar_bp.set_attribute("range", "100.0")
         self.lidar_bp.set_attribute("upper_fov", "15")
@@ -367,7 +464,7 @@ class NewCarlaEnv(gym.Env):
         self.camera_img = np.zeros(
             (4, self.img_size, self.img_size, 3), dtype=np.dtype("uint8")
         )
-        self.camera_bp = self.world.get_blueprint_library().find("sensor.camera.rgb")
+        self.camera_bp = self._find_blueprint_or_fail("sensor.camera.rgb", "RGB Camera Sensor")
 
         # Modify the attributes of the blueprint to set image resolution and field of view.
         self.camera_bp.set_attribute("image_size_x", str(self.img_size))
@@ -392,7 +489,7 @@ class NewCarlaEnv(gym.Env):
 
 
 
-        self.bev_output_folder = '/home/ubuntu/bev_output/'
+        self.bev_output_folder = 'bev_output'
 
         print("making out dir...")
         os.makedirs(self.bev_output_folder, exist_ok=True)
@@ -641,7 +738,7 @@ class NewCarlaEnv(gym.Env):
     
 
     def make_bev_camera_bp(self, bev_params):
-        bev_cam_bp = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+        bev_cam_bp = self._find_blueprint_or_fail('sensor.camera.semantic_segmentation', 'BEV Semantic Segmentation Camera')
         bev_cam_bp.set_attribute('image_size_x', bev_params['dim_x'])
         bev_cam_bp.set_attribute('image_size_y', bev_params['dim_y'])
         bev_cam_bp.set_attribute('fov', bev_params['fov'])
@@ -683,22 +780,62 @@ class NewCarlaEnv(gym.Env):
 
         # Spawn Ego
         while True:
-          carla_map = self.world.get_map()
+          try:
+              carla_map = self.world.get_map()
+          except RuntimeError as e:
+              report = (
+                  "\n========== FAILURE REPORT ==========\n"
+                  "  Stage:       Episode Reset\n"
+                  "  Component:   Map Retrieval\n"
+                  f"  Raw Error:   {e}\n"
+                  "\n"
+                  "  Possible Causes:\n"
+                  "    1. The CARLA server disconnected mid-episode.\n"
+                  "    2. The server is mid-reload after apply_settings.\n"
+                  "====================================\n"
+              )
+              print(report)
+              raise RuntimeError(report) from e
 
+          if carla_map is None:
+              report = (
+                  "\n========== FAILURE REPORT ==========\n"
+                  "  Stage:       Episode Reset\n"
+                  "  Component:   Map Retrieval\n"
+                  "  Raw Error:   world.get_map() returned None\n"
+                  "\n"
+                  "  Possible Causes:\n"
+                  "    1. The CARLA world has no map loaded.\n"
+                  "    2. The server is mid-reload. Restart CarlaUE4.exe.\n"
+                  "====================================\n"
+              )
+              print(report)
+              raise RuntimeError(report)
 
-          if(carla_map == None):
-            print("ERROR, map could not be retrieved")
+          if len(self.vehicle_spawn_points) < 2:
+              report = (
+                  "\n========== FAILURE REPORT ==========\n"
+                  "  Stage:       Episode Reset\n"
+                  "  Component:   Spawn Point Selection\n"
+                  f"  Spawn Points Found: {len(self.vehicle_spawn_points)}\n"
+                  "  Raw Error:   Not enough spawn points to select start and destination.\n"
+                  "\n"
+                  "  Possible Causes:\n"
+                  "    1. The loaded map has fewer than 2 vehicle spawn points.\n"
+                  "       At least 2 distinct points are required (start and destination).\n"
+                  "    2. You are using a custom map with insufficient spawn point definitions.\n"
+                  "====================================\n"
+              )
+              print(report)
+              raise RuntimeError(report)
 
-          if(len(self.vehicle_spawn_points) == 0):
-            print("ERROR, no spawn points found") 
-
-          # Choose a random starting location (point A)
           point_a = random.choice(self.vehicle_spawn_points)
 
-          # Choose a random destination (point B)
-          point_b = random.choice(self.vehicle_spawn_points)
+          point_b = random.choice(self.vehicle_spawn_points) 
           while point_b.location == point_a.location:
-              point_b = random.choice(spawn_points)
+              point_b = random.choice(self.vehicle_spawn_points)
+              # this line used to say the below comment and that looked like a bug to me. just in case I am keeping it there.
+              # point_b = random.choice(spawn_points)
 
           start_waypoint = carla_map.get_waypoint(point_a.location)
           end_waypoint = carla_map.get_waypoint(point_b.location)
@@ -890,7 +1027,7 @@ class NewCarlaEnv(gym.Env):
             + " Step: "
             + str(self.time_step)
             + " Dist: "
-            + str(round(dist))
+            + str(round(dist, 2))
             + " Reward: "
             + str(round(reward))
             + " Throttle: "
@@ -1024,11 +1161,43 @@ class NewCarlaEnv(gym.Env):
         return bp
 
     def _set_synchronous_mode(self):
-        new_settings = self.world.get_settings()
-        new_settings.synchronous_mode = True
-        new_settings.fixed_delta_seconds = 0.05
-        self.world.apply_settings(new_settings) 
-        self.client.reload_world(False)
+        try:
+            new_settings = self.world.get_settings()
+            new_settings.synchronous_mode = True
+            new_settings.fixed_delta_seconds = 0.05
+            self.world.apply_settings(new_settings) 
+        except RuntimeError as e:
+            report = (
+                "\n========== FAILURE REPORT ==========\n"
+                "  Stage:       Environment Initialization\n"
+                "  Component:   Synchronous Mode Setup (apply_settings)\n"
+                f"  Raw Error:   {e}\n"
+                "\n"
+                "  Possible Causes:\n"
+                "    1. The CARLA server disconnected.\n"
+                "    2. Another client already has conflicting settings applied.\n"
+                "====================================\n"
+            )
+            print(report)
+            raise RuntimeError(report) from e
+
+        try:
+            self.world = self.client.reload_world(False)
+        except RuntimeError as e:
+            report = (
+                "\n========== FAILURE REPORT ==========\n"
+                "  Stage:       Environment Initialization\n"
+                "  Component:   World Reload (reload_world)\n"
+                f"  Raw Error:   {e}\n"
+                "\n"
+                "  Possible Causes:\n"
+                "    1. The CARLA server timed out during world reload.\n"
+                "       reload_world can be slow on large maps.\n"
+                "    2. The server crashed during reload. Restart CarlaUE4.exe.\n"
+                "====================================\n"
+            )
+            print(report)
+            raise RuntimeError(report) from e
 
     def _try_spawn_random_vehicle_at(self, transform, number_of_wheels=[4]):
         """Try to spawn a surrounding vehicle at specific transform with random bluprint.
