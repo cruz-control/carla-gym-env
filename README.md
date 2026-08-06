@@ -1,15 +1,26 @@
-These files consist of a CARLA gym environment, based on the [gym-carla](https://github.com/cjy1992/gym-carla.git) library. Currently, the gym environment is customized to provide observation state details using a front, rear, and 2 side cameras. A top down point-cloud based view is also made possible through LIDAR.
+This repository provides a CARLA Gymnasium environment, to be used by reinforcement learning for autonomous vehicle research experiments. 
 
-The run.py file runs a DQN algorithm from [Stable Baselines](https://stable-baselines.readthedocs.io/en/master/), using the gym environment. Steps to use this environment:
+Steps for setup:
 
-1. Download and run the latest version of CARLA. This environment was tested on CARLA v0.9.15
-2. Create and activate a conda environment. (This environment was tested on python 3.7)
-3. Clone the repo and cd into the gym-carla folder.
-Run the following:
-4. pip3 install -r requirements.txt
-5. pip3 install -e .
-6. export PYTHONPATH=$PYTHONPATH:<path to CARLA installation folder/PythonAPI/carla/dist/carla-"replace with version"-py3...>
-7. Modify run.py with the port number you are running CARLA on, as well as any other parameters you would like to change.
-8. python3 run.py
+prerequisites:
+1. Install Carla 0.9.15: Check out the prerequisites and the installation guide for CARLA --> https://carla.readthedocs.io/en/latest/start_quickstart/#before-you-begin
+2. Python 3.10: Required to match the CARLA 0.9.15 wheel.
+3. NVIDIA GPU: requirement may vary depending on experiment however you can checkout the CARLA guide above for the minimum requirements.
 
-If all steps were successful, you should see a Pygame window visualizing the RL algorithm running.
+installation:
+1. Clone the repository
+2. create and activate the conda environment (Python 3.10)
+3. install dependencies 
+    ```bash
+   pip install gymnasium stable-baselines3 scipy scikit-image pillow tensorboard
+   pip install torch torchvision
+    ```
+4. Modify run.py with the port number you are running CARLA on, generally the default is port 2000.
+5. Run Carla
+6. From the root of the repository run the training script:
+   ```bash
+   python train.py
+   ```
+
+Task Tracking:
+[You can pick up a task from here](https://app.notion.com/p/aiea/2e0c03a14c2c80e7a552d722e9fc8df3?v=2e0c03a14c2c8020b4ec000c7b04f4ef&source=copy_link)
